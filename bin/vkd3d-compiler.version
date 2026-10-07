@@ -12,3 +12,6 @@ vkd3d-2.1-93-gcfcb4833
 0011-vkd3d-shader-Scalar-double-precision-for-shader-mode.patch
 0012-vkd3d-shader-hlsl-Do-not-fold-every-static-initialis.patch
 0013-vkd3d-common-Make-VKD3D_NO_TRACE_MESSAGES-builds-com.patch
+0014-vkd3d-shader-hlsl-Split-struct-variables-into-one-va.patch
+0015-vkd3d-shader-hlsl-Turn-multiplication-and-unsigned-d.patch
+0016-vkd3d-shader-hlsl-Value-numbering-for-loads-and-expr.patch

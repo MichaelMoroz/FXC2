@@ -1,7 +1,7 @@
 From 1b98164c1d88b323fb6eb3c66a3e81198c2741d9 Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 07:26:00 +0200
-Subject: [PATCH 12/13] vkd3d-shader/hlsl: Do not fold every static initialiser
+Subject: [PATCH 12/16] vkd3d-shader/hlsl: Do not fold every static initialiser
  to evaluate a literal expression.
 
 ---
