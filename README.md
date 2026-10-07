@@ -23,7 +23,8 @@ This repo packages that as:
 | `bin/unity/` | The pair of DLLs Unity needs: a loader-proof stub named `D3DCompiler_47.dll` plus the real compiler as `fxc2_d3dcompiler.dll` (see Unity below). |
 | `patches/` | 45 patches on top of upstream vkd3d (see below); `tools/vkd3d-patch-scripts/` has the scripts they were made with. |
 | `tools/replay.py` | Recompiles sources the DLL captured (a Unity project's, say) with and without the optimisations and with FXC, and compares. |
-| `shaderemu/rvc_opt-fxc2.patch` | The changes to ShaderEmu's shader described under "The emulator shader". |
+| `shaderemu/rvc_opt-fxc2.patch` | The changes to ShaderEmu's shader described under "The emulator shader" (merged there since). |
+| `tools/unity_render_shaders.cs`, `tools/compare_images.py` | Render every shader in a Unity folder with fxc2 and with the stock compiler, and compare the pictures. |
 | `scripts/unity-overlay.ps1` | Makes a junction-based copy of a Unity editor that compiles with fxc2, leaving the real install untouched. |
 | `tools/failsrc.py` | Shows the source lines behind errors in sources the DLL saved (call tracing, below). |
 | `tools/se_matrix.py` | Benchmarks ShaderEmu under FXC, DXC or fxc2 with any setting of the tuning switches. |
@@ -112,8 +113,9 @@ as shipped (plus a test texture and a tinted, dimmed light, so that the picture 
   the faster one, by 2 to 4 times (rendering all fourteen configurations cold took 891 s
   against 233 s); where FXC optimises, fxc2 is about 4 times faster.
 - Member functions are compiled as functions that take every field of the struct as an `inout`
-  parameter, and Poiyomi's decal struct has about 70; that is where much of fxc2's time on the
-  all-features variants goes.
+  parameter, and Poiyomi's decal struct has about 70, so every call copies 70 values in and
+  out before the optimiser removes what it can. How much of the compile time that is was not
+  measured.
 
 **ShaderEmu** (a RISC-V machine in a pixel shader; `rvc_harness --d3d11` with
 `d3dcompiler_47.dll` placed next to the executable).
@@ -199,9 +201,9 @@ whose result is multiplied by a zeroed-out light is now removed.
 
 With compiles taking 9 seconds instead of 9 minutes the shader itself can be
 tuned on D3D11, and two things in it only fxc2 can compile.
-`shaderemu/rvc_opt-fxc2.patch` is the change to ShaderEmu's
-`experiments/rvc_opt` (apply with `git apply`); under FXC the patched shader
-builds and behaves as before.
+The changes are in ShaderEmu itself now (`docs/fxc2.md` there);
+`shaderemu/rvc_opt-fxc2.patch` is the same thing as a patch against the commit
+before them. Under FXC the shader builds and behaves as before.
 
 - **`inout` arrays by reference (patch 38).** The shader's `L1_LOCAL` option
   makes its 1024-entry write cache a local array handed down through a dozen
