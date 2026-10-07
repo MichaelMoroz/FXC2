@@ -21,9 +21,10 @@ This repo packages that as:
 | `bin/vkd3d-compiler.exe` | Upstream vkd3d CLI (also does DXBC → SPIR-V/GLSL/MSL/asm). |
 | `tools/hlsl2dxbc.py` | Front-end chooser: `direct`, via Slang, via DXC + SPIRV-Cross, or `auto`. |
 | `bin/unity/` | The pair of DLLs Unity needs: a loader-proof stub named `D3DCompiler_47.dll` plus the real compiler as `fxc2_d3dcompiler.dll` (see Unity below). |
-| `patches/` | 13 patches on top of upstream vkd3d (see below). |
+| `patches/` | 29 patches on top of upstream vkd3d (see below). |
 | `scripts/unity-overlay.ps1` | Makes a junction-based copy of a Unity editor that compiles with fxc2, leaving the real install untouched. |
 | `tools/failsrc.py` | Shows the source lines behind errors in sources the DLL saved (call tracing, below). |
+| `tools/se_matrix.py` | Benchmarks ShaderEmu under FXC, DXC or fxc2 with any setting of the tuning switches. |
 | `scripts/build-vkd3d.sh` | Reproducible cross-build of everything in `bin/` from WSL/Linux. |
 
 ```bash
@@ -58,28 +59,86 @@ Use `-T` rather than `/T` from Git Bash (MSYS rewrites `/T` into a path).
 
 | | FXC | fxc2 |
 |---|---|---|
-| `CPUTick` fragment pass, compile time | 533.1 s | 6.3 s |
-| bytecode size of that pass | 348,572 bytes | 520,608 bytes |
-| state hash after 600 fixed-timestep frames | `635acdc94aff149f` | `635acdc94aff149f` |
+| `CPUTick` fragment pass, compile time | 533.1 s | 7.8 s |
+| bytecode size of that pass | 348,572 bytes | 530,048 bytes |
+| state hash, 600 fixed-timestep frames | `635acdc94aff149f` | `635acdc94aff149f` |
+| state hash, 6000 frames | `d3384baf5ab1cd3f` | `d3384baf5ab1cd3f` |
 | Linux boot to `/ # `: guest instructions | 42,352,129 | 42,352,129 |
 | Linux boot: console output (7,312 bytes) | | identical |
-| Linux boot: emulation speed | 1,428k IPS | 1,201k IPS |
-| 600-frame bench: emulation speed | 1,398k IPS | 1,324k IPS |
+| Linux boot: emulation speed | 1,488k IPS | 1,472k IPS |
+| 6000-frame bench: emulation speed | 1,595k IPS | 1,570k IPS |
 
-So the emulated machine behaves identically, the shader compiles about 85
-times faster, and it runs 5 to 16% slower. Only the upstream `linux` image was
-booted; the project's own `linux-net` image and the GPU-device test images
-were not run.
+So the emulated machine behaves identically, the shader compiles about 70
+times faster, and it runs within 1 to 2% of FXC's build. Only the upstream
+`linux` image was booted; the project's own `linux-net` image and the
+GPU-device test images were not run.
+
+The Unity results above were taken before the code-generation work described
+under "Performance of the generated code"; the Unity suite has not been
+re-run with those patches. The 20 execution tests in `tests/` and the
+ShaderEmu runs here have.
+
+## Performance of the generated code
+
+The first build that ran ShaderEmu correctly was 15% slower than FXC's
+(1,350k against 1,580k IPS). It is now within 2%. What was measured, with
+`tools/se_matrix.py` (ShaderEmu's `--bench` mode; repeat runs agree to about
+0.3%, where fps counters and GPU timer queries drifted by several percent):
+
+| compiler | IPS | fixed cost per frame | per emulated instruction |
+|---|---|---|---|
+| DXC, D3D12 | 2,003k | 0.430 ms | 288 ns |
+| FXC, D3D11 | 1,595k | 0.693 ms | 287 ns |
+| fxc2, D3D11 | 1,570k | 0.685 ms | 300 ns |
+
+Two things follow from splitting the time that way. DXC's lead on this machine
+is all fixed per-frame cost, which comes from the D3D12 harness and a source
+option (`L1_LOCAL`), not from better code in the emulation loop: per
+instruction DXC and FXC are equal. And fxc2 matches FXC's fixed cost and is
+about 4% behind per instruction.
+
+What moved the number, and what did not (each switch below turns one thing off
+or changes a limit, so this can be repeated on another GPU):
+
+| change | switch | effect on ns per instruction |
+|---|---|---|
+| struct variables split into per-field variables | `VKD3D_HLSL_SPLIT_STRUCTS=0` | 311 -> 322 without |
+| reuse of repeated loads and common subexpressions | `VKD3D_HLSL_VALUE_NUMBERING=0` | 311 -> 321 without |
+| code after `if (c) return x;` moved into the else branch | `VKD3D_HLSL_RETURN_ELSE=0` | 311 -> 322 without |
+| small tails duplicated instead of testing a "returned" flag | `VKD3D_HLSL_RETURN_DUP=<n>` | 312 at 0, 311 at 24, 298 at 200 (default) |
+| ifs with small bodies become selects | `VKD3D_HLSL_FLATTEN=<n>` | 326 at 0, 311 at 10 (default), 305 at 30 |
+| values used in loops get a register to themselves | `VKD3D_PACK_REGISTERS=0/1` | per instruction equal; packing everything costs 0.14 ms of fixed time |
+| variables read in place instead of copied per load | `VKD3D_HLSL_ELIDE_LOADS=0` | within noise, 10% smaller bytecode |
+| `switch` without `[forcecase]` as an if chain, like FXC | `VKD3D_HLSL_SWITCH=1` | within noise |
+| returns inside switch cases handled as ifs | `VKD3D_HLSL_RETURN_SWITCH=0` | within noise |
+| multiplication and unsigned division by powers of two as shifts | (always on) | about 1% |
+| small constant loops unrolled within a budget | `VKD3D_HLSL_UNROLL_BUDGET=<n>` | within noise here |
+| branches that store to arrays left as branches | `VKD3D_HLSL_KEEP_ARRAY_BRANCHES=0` | within noise |
+
+The pattern: this driver redoes instruction-level cleanup itself, so removing
+thousands of redundant instructions barely registers, while anything that
+changes the shape of control flow, or which values share a register, does.
+That matches the shader author's own notes (branches and merges after them
+dominate the per-pixel cost of this loop).
+
+Not done: `L1_LOCAL` passes a 1024-entry array through many functions as an
+`inout` parameter. vkd3d copies the array in and out at every call, which gives
+a 2 MB shader that does not run; inlining such parameters by reference would
+be needed to use that option.
+
+One difference from FXC found on the way: for a `switch` whose only label is
+`default`, FXC drops the body entirely (the test returned 0 where the source
+adds 0.0625); vkd3d executes it. That is left as it is.
 
 ## Results
 
 Measured on this machine by `tests/run.py`, `tests/bench.py` and
 `tests/features.py`; FXC 10.0.26100 is the reference.
 
-**Correctness.** All 17 test shaders compile (15 directly, one each through
-the Slang and DXC routes). The 16 that target SM4+ are accepted by the D3D11
+**Correctness.** All 22 test shaders compile (20 directly, one each through
+the Slang and DXC routes). The 21 that target SM4+ are accepted by the D3D11
 runtime, on WARP and on the hardware GPU (`--gpu`); the SM3 one is only checked
-to compile, nothing loads it into D3D9. The nine pixel shaders with
+to compile, nothing loads it into D3D9. The 14 pixel shaders with
 a render check produce the same image as the FXC build (max channel difference
 1.2e-4 on the GPU, float rounding), and the compute shader leaves bit-identical
 buffer contents.
@@ -183,6 +242,16 @@ behaviour change was checked against FXC by executing both builds.
 13. `VKD3D_NO_TRACE_MESSAGES` builds did not compile. The build uses it because
     trace calls evaluate their arguments, string formatting included, even when
     tracing is off.
+
+Patches 14 to 29 are about the speed of the generated code (see "Performance
+of the generated code"): scalar replacement of struct variables (14), shifts
+for powers of two (15), value numbering (16), reading variables in place (17),
+loop-aware register packing (18, 28), the tuning switches (19, 21), switches
+as if chains (20, 26, 29), restructuring of early returns (22, 24), no
+flattening of branches that touch arrays (23), an optional round-robin
+register allocator (25) and budgeted loop unrolling, which replaces patch 1's
+blanket "never unroll" and fixes implicit limits silently truncating loops
+(27).
 
 ## Approaches that do not work
 
