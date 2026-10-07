@@ -1,3 +1,13 @@
+From a8880ded0816080f6e7b7237b6e9c98057dc8a4b Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Wed, 7 Oct 2026 04:54:00 +0200
+Subject: [PATCH 1/2] vkd3d-shader/hlsl: Do not implicitly unroll SM4+ loops
+ unless gradients need it.
+
+---
+ libs/vkd3d-shader/hlsl_codegen.c | 58 ++++++++++++++++++++++++++++++++
+ 1 file changed, 58 insertions(+)
+
 diff --git a/libs/vkd3d-shader/hlsl_codegen.c b/libs/vkd3d-shader/hlsl_codegen.c
 index b0e28f30..0f87cbcb 100644
 --- a/libs/vkd3d-shader/hlsl_codegen.c
@@ -74,3 +84,6 @@ index b0e28f30..0f87cbcb 100644
      if (loop->unroll_limit.node)
      {
          struct hlsl_ir_constant *c;
+-- 
+2.53.0
+

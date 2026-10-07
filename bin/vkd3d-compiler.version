@@ -1,2 +1,3 @@
 vkd3d-2.1-93-gcfcb4833
-0001-hlsl-no-implicit-loop-unrolling-sm4.patch
+0001-vkd3d-shader-hlsl-Do-not-implicitly-unroll-SM4-loops.patch
+0002-vkd3d-shader-hlsl-Add-isnan-isfinite-and-reversebits.patch
