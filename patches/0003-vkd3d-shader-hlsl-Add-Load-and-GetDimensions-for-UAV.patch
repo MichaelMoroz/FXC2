@@ -1,4 +1,4 @@
-From 5e0282a13ceb6735cab67f6593859f9de8133b9d Mon Sep 17 00:00:00 2001
+From a6f04a1162303122a095363261c4ce55c7528beb Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 05:04:13 +0200
 Subject: [PATCH 3/3] vkd3d-shader/hlsl: Add Load() and GetDimensions() for
@@ -69,7 +69,7 @@ index 4676a996..6497b296 100644
      { "Store2", add_store_method_call, "00000000000001" },
      { "Store3", add_store_method_call, "00000000000001" },
 diff --git a/libs/vkd3d-shader/hlsl_codegen.c b/libs/vkd3d-shader/hlsl_codegen.c
-index 0f87cbcb..bd266ffc 100644
+index 34fc8450..d3e53cdd 100644
 --- a/libs/vkd3d-shader/hlsl_codegen.c
 +++ b/libs/vkd3d-shader/hlsl_codegen.c
 @@ -13432,10 +13432,10 @@ static bool sm4_generate_vsir_instr_ld(struct hlsl_ctx *ctx,

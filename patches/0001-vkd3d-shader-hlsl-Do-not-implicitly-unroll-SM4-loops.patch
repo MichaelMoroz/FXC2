@@ -1,80 +1,29 @@
-From a8880ded0816080f6e7b7237b6e9c98057dc8a4b Mon Sep 17 00:00:00 2001
+From f19b0d81c001de2034eaacf263852f4bc44b3e68 Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
-Date: Wed, 7 Oct 2026 04:54:00 +0200
-Subject: [PATCH 1/3] vkd3d-shader/hlsl: Do not implicitly unroll SM4+ loops
- unless gradients need it.
+Date: Wed, 7 Oct 2026 05:08:37 +0200
+Subject: [PATCH 1/3] vkd3d-shader/hlsl: Do not implicitly unroll SM4+ loops.
 
 ---
- libs/vkd3d-shader/hlsl_codegen.c | 58 ++++++++++++++++++++++++++++++++
- 1 file changed, 58 insertions(+)
+ libs/vkd3d-shader/hlsl_codegen.c | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
 
 diff --git a/libs/vkd3d-shader/hlsl_codegen.c b/libs/vkd3d-shader/hlsl_codegen.c
-index b0e28f30..0f87cbcb 100644
+index b0e28f30..34fc8450 100644
 --- a/libs/vkd3d-shader/hlsl_codegen.c
 +++ b/libs/vkd3d-shader/hlsl_codegen.c
-@@ -16065,6 +16065,45 @@ fail:
-     return false;
- }
- 
-+/* fxc2: screen-space derivatives are undefined inside a real loop, so loops
-+ * using them still have to be unrolled the way FXC does. */
-+static bool find_gradient_op(struct hlsl_ctx *ctx, struct hlsl_ir_node *node, void *context)
-+{
-+    bool *found = context;
-+
-+    if (node->type == HLSL_IR_RESOURCE_LOAD)
-+    {
-+        switch (hlsl_ir_resource_load(node)->load_type)
-+        {
-+            case HLSL_RESOURCE_SAMPLE:
-+            case HLSL_RESOURCE_SAMPLE_CMP:
-+            case HLSL_RESOURCE_SAMPLE_LOD_BIAS:
-+            case HLSL_RESOURCE_SAMPLE_PROJ:
-+                *found = true;
-+                break;
-+            default:
-+                break;
-+        }
-+    }
-+    else if (node->type == HLSL_IR_EXPR)
-+    {
-+        switch (hlsl_ir_expr(node)->op)
-+        {
-+            case HLSL_OP1_DSX:
-+            case HLSL_OP1_DSX_COARSE:
-+            case HLSL_OP1_DSX_FINE:
-+            case HLSL_OP1_DSY:
-+            case HLSL_OP1_DSY_COARSE:
-+            case HLSL_OP1_DSY_FINE:
-+                *found = true;
-+                break;
-+            default:
-+                break;
-+        }
-+    }
-+    return false;
-+}
-+
- static bool unroll_loops(struct hlsl_ctx *ctx, struct hlsl_ir_node *node, void *context)
- {
-     struct hlsl_block *program = context;
-@@ -16079,6 +16118,25 @@ static bool unroll_loops(struct hlsl_ctx *ctx, struct hlsl_ir_node *node, void *
+@@ -16079,6 +16079,21 @@ static bool unroll_loops(struct hlsl_ctx *ctx, struct hlsl_ir_node *node, void *
      if (loop->unroll_type == HLSL_LOOP_FORCE_LOOP)
          return false;
  
-+    /* fxc2: FXC-style implicit unrolling of every loop makes compile time and
-+     * code size explode on loop-heavy SM4+ shaders. Unless the
-+     * VKD3D_HLSL_IMPLICIT_UNROLL_LIMIT environment variable asks for it, only
-+     * unroll loops that are marked [unroll] or that need it for gradients. */
++    /* fxc2: speculatively unrolling every loop, as upstream does to mimic
++     * FXC, makes compile time and code size explode on loop-heavy SM4+
++     * shaders. Only unroll loops marked [unroll], unless the
++     * VKD3D_HLSL_IMPLICIT_UNROLL_LIMIT environment variable sets a limit. */
 +    if (loop->unroll_type != HLSL_LOOP_FORCE_UNROLL && hlsl_version_ge(ctx, 4, 0))
 +    {
 +        const char *limit = getenv("VKD3D_HLSL_IMPLICIT_UNROLL_LIMIT");
-+        bool has_gradient = false;
 +
-+        hlsl_transform_ir(ctx, find_gradient_op, &loop->body, &has_gradient);
-+        if (limit)
-+            unroll_limit = strtoul(limit, NULL, 0);
-+        if (!has_gradient && !unroll_limit)
++        if (!limit || !(unroll_limit = strtoul(limit, NULL, 0)))
 +        {
 +            loop->unroll_type = HLSL_LOOP_FORCE_LOOP;
 +            return false;

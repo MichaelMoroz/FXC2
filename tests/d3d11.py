@@ -9,6 +9,7 @@ import struct
 from ctypes import POINTER, byref, c_float, c_int, c_size_t, c_uint, c_void_p, c_uint64
 
 HRESULT = ctypes.c_long
+D3D_DRIVER_TYPE_HARDWARE = 1
 D3D_DRIVER_TYPE_WARP = 5
 D3D11_SDK_VERSION = 7
 DXGI_FORMAT_R32G32B32A32_FLOAT = 2
@@ -34,10 +35,12 @@ def _release(obj):
 
 
 class Device:
-    def __init__(self):
+    def __init__(self, hardware=False):
+        """WARP (software) by default; hardware=True uses the default GPU."""
         self.dev, self.ctx = c_void_p(), c_void_p()
         d3d11 = ctypes.WinDLL("d3d11")
-        hr = d3d11.D3D11CreateDevice(None, D3D_DRIVER_TYPE_WARP, None, 0, None, 0, D3D11_SDK_VERSION,
+        driver = D3D_DRIVER_TYPE_HARDWARE if hardware else D3D_DRIVER_TYPE_WARP
+        hr = d3d11.D3D11CreateDevice(None, driver, None, 0, None, 0, D3D11_SDK_VERSION,
                                      byref(self.dev), None, byref(self.ctx))
         if hr < 0:
             raise OSError("D3D11CreateDevice failed: 0x%08x" % (hr & 0xffffffff))
@@ -56,8 +59,10 @@ class Device:
         _release(shader)
         return hr
 
-    def render(self, vs_blob, ps_blob, cb_data, width=128, height=128):
-        """Draws a fullscreen triangle; returns a list of width*height*4 floats."""
+    def render(self, vs_blob, ps_blob, cb_data, width=128, height=128, readback=True):
+        """Draws a fullscreen triangle; returns a list of width*height*4 floats.
+        With readback=False only the first row is returned: mapping still
+        waits for the GPU to finish, which is all a timing run needs."""
         vs, hr = self.create_shader("vs", vs_blob)
         ps, hr2 = self.create_shader("ps", ps_blob)
         if not vs or not ps:
@@ -99,7 +104,7 @@ class Device:
         m = Mapped()
         assert _call(self.ctx, CTX_MAP, HRESULT, staging, c_uint(0), c_uint(1), c_uint(0), byref(m)) >= 0
         pixels = []
-        for y in range(height):
+        for y in range(height if readback else 1):
             row = ctypes.string_at(m.data + y * m.row_pitch, width * 16)
             pixels.extend(struct.unpack("%df" % (width * 4), row))
         _call(self.ctx, CTX_UNMAP, None, staging, c_uint(0))

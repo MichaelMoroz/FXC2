@@ -161,7 +161,8 @@ static void usage(void)
             "  /WX             treat warnings as errors\n"
             "  /Qstrip_reflect /Qstrip_debug   strip RDEF / debug data\n"
             "  /unroll <n>     implicitly unroll loops of up to <n> iterations, like fxc\n"
-            "                  does (default: 0 = only loops marked [unroll])\n"
+            "                  does. Default: only loops marked [unroll], falling back\n"
+            "                  to 254 if the shader does not compile otherwise.\n"
             "  /dumpbin        treat the input as a compiled object and disassemble it\n"
             "  /nologo         accepted and ignored\n"
             "\n"
@@ -374,6 +375,22 @@ int main(int argc, char **argv)
 
     hr = D3DCompile2(data, size, input, macros, &include_handler, entry, profile, flags, 0, 0, NULL, 0,
             &code, &errors);
+    if (FAILED(hr) && !getenv("VKD3D_HLSL_IMPLICIT_UNROLL_LIMIT"))
+    {
+        /* Some shaders are only valid once their loops are unrolled (e.g. a
+         * loop counter selecting a texture or a texel offset). Retry the way
+         * fxc would have compiled it before reporting failure. */
+        ID3DBlob *code2 = NULL, *errors2 = NULL;
+
+        _putenv("VKD3D_HLSL_IMPLICIT_UNROLL_LIMIT=254");
+        if (SUCCEEDED(D3DCompile2(data, size, input, macros, &include_handler, entry, profile, flags,
+                0, 0, NULL, 0, &code2, &errors2)) && code2)
+        {
+            hr = S_OK;
+            code = code2;
+            errors = errors2;
+        }
+    }
     if (errors)
         fputs(ID3D10Blob_GetBufferPointer(errors), stderr);
     if (FAILED(hr) || !code)

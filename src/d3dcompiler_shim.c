@@ -21,6 +21,60 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, void *reserved)
     return TRUE;
 }
 
+/* The compiler is built not to unroll loops speculatively (see patches/).
+ * Some shaders are only valid once unrolled, e.g. when a loop counter selects
+ * a texture, so on failure compile again the way fxc would have. The limit is
+ * passed through the environment, which is process wide: a compile running
+ * concurrently on another thread may unroll too, which is slower but correct. */
+HRESULT WINAPI fxc2_D3DCompile2(const void *data, SIZE_T data_size, const char *filename,
+        const D3D_SHADER_MACRO *macros, ID3DInclude *include, const char *entrypoint, const char *profile,
+        UINT flags, UINT effect_flags, UINT secondary_flags, const void *secondary_data,
+        SIZE_T secondary_data_size, ID3DBlob **shader, ID3DBlob **error_messages)
+{
+    ID3DBlob *retry_shader = NULL, *retry_messages = NULL;
+    HRESULT hr;
+
+    hr = D3DCompile2(data, data_size, filename, macros, include, entrypoint, profile, flags, effect_flags,
+            secondary_flags, secondary_data, secondary_data_size, shader, error_messages);
+    if (SUCCEEDED(hr) || getenv("VKD3D_HLSL_IMPLICIT_UNROLL_LIMIT"))
+        return hr;
+
+    _putenv("VKD3D_HLSL_IMPLICIT_UNROLL_LIMIT=254");
+    if (SUCCEEDED(D3DCompile2(data, data_size, filename, macros, include, entrypoint, profile, flags,
+            effect_flags, secondary_flags, secondary_data, secondary_data_size, &retry_shader, &retry_messages)))
+    {
+        if (error_messages)
+        {
+            if (*error_messages)
+                ID3D10Blob_Release(*error_messages);
+            *error_messages = retry_messages;
+        }
+        else if (retry_messages)
+        {
+            ID3D10Blob_Release(retry_messages);
+        }
+        if (shader)
+            *shader = retry_shader;
+        else if (retry_shader)
+            ID3D10Blob_Release(retry_shader);
+        hr = S_OK;
+    }
+    else if (retry_messages)
+    {
+        ID3D10Blob_Release(retry_messages);
+    }
+    _putenv("VKD3D_HLSL_IMPLICIT_UNROLL_LIMIT=");
+    return hr;
+}
+
+HRESULT WINAPI fxc2_D3DCompile(const void *data, SIZE_T data_size, const char *filename,
+        const D3D_SHADER_MACRO *macros, ID3DInclude *include, const char *entrypoint, const char *profile,
+        UINT flags, UINT effect_flags, ID3DBlob **shader, ID3DBlob **error_messages)
+{
+    return fxc2_D3DCompile2(data, data_size, filename, macros, include, entrypoint, profile, flags,
+            effect_flags, 0, NULL, 0, shader, error_messages);
+}
+
 HRESULT WINAPI D3DReadFileToBlob(const WCHAR *filename, ID3DBlob **contents)
 {
     DWORD size, read;
@@ -71,7 +125,7 @@ HRESULT WINAPI D3DCompileFromFile(const WCHAR *filename, const D3D_SHADER_MACRO 
     if (!WideCharToMultiByte(CP_ACP, 0, filename, -1, path, sizeof(path), NULL, NULL))
         path[0] = 0;
 
-    hr = D3DCompile2(ID3D10Blob_GetBufferPointer(source), ID3D10Blob_GetBufferSize(source), path, defines,
+    hr = fxc2_D3DCompile2(ID3D10Blob_GetBufferPointer(source), ID3D10Blob_GetBufferSize(source), path, defines,
             include, entrypoint, target, flags1, flags2, 0, NULL, 0, code, errors);
     ID3D10Blob_Release(source);
     return hr;

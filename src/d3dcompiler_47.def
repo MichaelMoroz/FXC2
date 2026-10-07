@@ -1,7 +1,7 @@
 LIBRARY d3dcompiler_47.dll
 EXPORTS
-    D3DCompile
-    D3DCompile2
+    D3DCompile = fxc2_D3DCompile
+    D3DCompile2 = fxc2_D3DCompile2
     D3DCompileFromFile
     D3DCreateBlob
     D3DDisassemble

@@ -2,14 +2,14 @@
 
 Checks, per shader:
   * fxc2 compiles it (and how long that takes);
-  * the D3D11 runtime accepts the DXBC (CreateXxxShader on WARP), SM4+ only;
+  * the D3D11 runtime accepts the DXBC (CreateXxxShader on WARP, or the GPU with --gpu), SM4+ only;
   * for shaders with a `// render: <floats>` line, a fullscreen draw matches
     the same shader compiled by fxc.exe pixel for pixel (within a tolerance).
 
 fxc.exe is used purely as the reference; tests still run without it, minus
 the comparison columns.
 
-Usage: python tests/run.py [--pipeline NAME] [--keep] [filter]
+Usage: python tests/run.py [--pipeline NAME] [--gpu] [filter]
 """
 import argparse
 import glob
@@ -80,11 +80,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("filter", nargs="?", default="")
     ap.add_argument("--pipeline", default="direct", help="direct (default), slang, dxc or auto")
+    ap.add_argument("--gpu", action="store_true", help="validate and execute on the GPU instead of WARP")
     args = ap.parse_args()
 
     os.makedirs(OUT, exist_ok=True)
     fxc = find_fxc()
-    dev = d3d11.Device()
+    dev = d3d11.Device(hardware=args.gpu)
+    print("device: %s\n" % ("hardware GPU" if args.gpu else "WARP"))
 
     vs_src = os.path.join(OUT, "_fullscreen_vs.hlsl")
     vs_obj = os.path.join(OUT, "_fullscreen_vs.dxbc")
