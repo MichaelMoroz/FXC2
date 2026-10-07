@@ -1,15 +1,15 @@
-From 79fef0d297e6d47cf7cdbfeec45e02c91c53197c Mon Sep 17 00:00:00 2001
+From 163f6ba5261c02ce668c54fd94cb5ed253adf40b Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
-Date: Wed, 7 Oct 2026 16:46:59 +0200
+Date: Wed, 7 Oct 2026 16:55:14 +0200
 Subject: [PATCH 33/33] vkd3d-shader/hlsl: Remove dead code by liveness, fold
  dot() with zero.
 
 ---
  libs/vkd3d-shader/hlsl.c              |   1 +
  libs/vkd3d-shader/hlsl.h              |  13 +
- libs/vkd3d-shader/hlsl_codegen.c      | 452 ++++++++++++++++++++++++++
+ libs/vkd3d-shader/hlsl_codegen.c      | 457 ++++++++++++++++++++++++++
  libs/vkd3d-shader/hlsl_constant_ops.c |   6 +
- 4 files changed, 472 insertions(+)
+ 4 files changed, 477 insertions(+)
 
 diff --git a/libs/vkd3d-shader/hlsl.c b/libs/vkd3d-shader/hlsl.c
 index 0719c4e2..21b2bfa4 100644
@@ -55,7 +55,7 @@ index 8aa18780..7d6ccd29 100644
       * load_can_be_elided(). */
      unsigned int *store_indices;
 diff --git a/libs/vkd3d-shader/hlsl_codegen.c b/libs/vkd3d-shader/hlsl_codegen.c
-index 1deb8191..29460846 100644
+index 1deb8191..962002d7 100644
 --- a/libs/vkd3d-shader/hlsl_codegen.c
 +++ b/libs/vkd3d-shader/hlsl_codegen.c
 @@ -7289,6 +7289,446 @@ static void dump_function(struct rb_entry *entry, void *context)
@@ -505,7 +505,7 @@ index 1deb8191..29460846 100644
  static bool hlsl_tuning_enabled(const char *variable, bool default_value);
  
  /* fxc2: scalar replacement of aggregates.
-@@ -18190,13 +18630,25 @@ static void process_entry_function(struct hlsl_ctx *ctx, struct vsir_program *pr
+@@ -18190,13 +18630,30 @@ static void process_entry_function(struct hlsl_ctx *ctx, struct vsir_program *pr
  
      remove_unreachable_code(ctx, body);
      hlsl_transform_ir(ctx, normalize_switch_cases, body, NULL);
@@ -515,18 +515,23 @@ index 1deb8191..29460846 100644
      if (hlsl_version_ge(ctx, 4, 0) && !hlsl_tuning_enabled("VKD3D_HLSL_SWITCH", false))
          hlsl_transform_ir(ctx, lower_switch_to_ifs, body, NULL);
  
-+    if (hlsl_version_ge(ctx, 4, 0) && hlsl_tuning_enabled("VKD3D_HLSL_ADCE", true)
-+            && adce_execute(ctx, body))
-+        hlsl_run_const_passes(ctx, body);
++    if (hlsl_version_ge(ctx, 4, 0) && hlsl_tuning_enabled("VKD3D_HLSL_ADCE", true))
++        adce_execute(ctx, body);
 +
      if (hlsl_version_ge(ctx, 4, 0) && hlsl_tuning_enabled("VKD3D_HLSL_SPLIT_STRUCTS", true)
              && sroa_execute(ctx, body))
          hlsl_run_const_passes(ctx, body);
  
-+    /* fxc2: again, now that structures are separate variables. */
++    /* fxc2: again, now that structures are separate variables. Removing dead
++     * code makes small branches flattenable that were not before; put the
++     * component stores in them together first, or each component is selected
++     * separately. */
 +    if (hlsl_version_ge(ctx, 4, 0) && hlsl_tuning_enabled("VKD3D_HLSL_ADCE", true)
 +            && adce_execute(ctx, body))
++    {
++        vectorize_stores(ctx, body);
 +        hlsl_run_const_passes(ctx, body);
++    }
 +
      replace_ir(ctx, lower_vector_derefs, body);
      replace_ir(ctx, lower_casts_to_bool, body);
