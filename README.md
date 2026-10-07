@@ -4,6 +4,149 @@ A working way to compile HLSL to DXBC (D3D10/11 shader bytecode, plus D3D9
 bytecode for SM1–3) that never touches Microsoft's `fxc.exe` /
 `d3dcompiler_47.dll`, and the investigation behind it.
 
+## What this is for
+
+Direct3D 11 runs shaders as DXBC bytecode, and the only compiler that has ever
+produced it is Microsoft's FXC (`fxc.exe`, `d3dcompiler_47.dll`): closed, no
+longer developed, and slow in a way nobody can fix. Its optimiser takes minutes
+on a large shader (nine minutes on the one this started with), and anything it
+refuses to compile stays uncompiled. Everything newer (DXC, Slang) produces
+DXIL or SPIR-V, which D3D11, and so Unity's built-in pipeline and VRChat, cannot
+load.
+
+fxc2 is a second compiler for the same bytecode: vkd3d's HLSL compiler (the
+one Wine uses) with 47 patches, packaged as a command line and as a drop-in
+`d3dcompiler_47.dll`. What comes out is ordinary DXBC. Whoever runs the result
+needs nothing: a Unity build or a VRChat world made with it contains the
+bytecode, not the compiler.
+
+## What you gain and what you give up
+
+Numbers are from the sections further down (one laptop, RTX 5070; details and
+caveats there).
+
+**Gains**
+
+- **Compile time where FXC is slow.** Shaders FXC's optimiser struggles with
+  compile in seconds:
+
+  | shader | FXC | fxc2 |
+  |---|---|---|
+  | ShaderEmu `CPUTick` (a RISC-V machine in one pixel shader) | 554 s | 9.3 s |
+  | upstream rvc's version of the same | 405 s | 5.2 s |
+  | Poiyomi Toon, one all-features pixel shader variant | 52.6 s | 12.4 s |
+  | generated call chain, 12 deep | 107 s | 3.1 s |
+  | small everyday shaders | 0.02 to 0.09 s | 0.01 to 0.03 s |
+
+- **A compiler that can be changed.** It is open source and this repository
+  builds it. Things added because a shader needed them: `inout` arrays worked
+  on in place (FXC cannot compile ShaderEmu's local-array variant at all;
+  with it that shader is 28% faster), `mulhi()` / `umulExtended()` for the
+  `umul` instruction HLSL cannot otherwise reach, and `__FXC2__` so one source
+  can serve both compilers.
+- **Speed of the generated code is about FXC's** on what was measured: equal
+  on a Unity project's own shaders, 1% behind on ShaderEmu's tuned shader from
+  the same source.
+- **It drops in.** Same command line switches as `fxc.exe`, same DLL exports;
+  Unity, ShaderEmu's harness and `slangc -target dxbc` use it unchanged.
+
+**Costs**
+
+- **The optimiser is weaker.** More instructions for the same shader (1.33x
+  FXC's over a Unity project, 1.45x on Poiyomi's all-features variants). The
+  GPU driver hides most of that, but not all: Poiyomi's heavy pixel shaders run
+  about 8% slower than FXC's optimised builds (worst case 1.5x), and upstream
+  rvc's emulator shader, which nobody shaped for this compiler, runs at 60% of
+  its FXC speed.
+- **No "skip optimisation" mode.** Unity asks for one for shaders with
+  `#pragma skip_optimizations` (unlocked Poiyomi materials); FXC then compiles
+  2 to 4 times faster than fxc2, which always optimises. For such shaders in
+  the editor the stock compiler is the quicker one.
+- **Not all of HLSL.** 71 of 82 feature probes pass (`docs/features.md`).
+  Missing: `CalculateLevelOfDetail`, `GetDimensions` on structured buffers,
+  buffer counters and `Interlocked*` on raw buffers, namespaces, classes and
+  interfaces, templates. Slang or DXC in front (see "The routes") cover the
+  language ones.
+- **Results are not bit-identical to FXC's.** Different instructions round
+  differently; in one of 252 pixel shaders compared that showed as a visible
+  difference (coordinates near 65,000 multiplied out and used to sample
+  noise). FXC's own optimised and unoptimised builds differ the same way in
+  another.
+- **It is young and has been wrong.** Two miscompiles were found by real
+  projects during this work and are fixed: one of this repository's own
+  optimisations (caught by a Unity project's tests) and one in vkd3d (`float -
+  uint` negated the unsigned value first; ShaderEmu's terminal showed it).
+  There are 26 execution tests here and the projects below; check what you
+  ship.
+- **Not exercised:** shader model 1 to 3 output is compiled but never run;
+  geometry, hull and domain shaders are checked to load and to render in
+  Unity, but not timed.
+
+## How to use it
+
+### Unity (built-in pipeline, D3D11)
+
+Unity compiles shaders with the `D3DCompiler_47.dll` in its editor folder, so
+the swap is made there. The supported way leaves the installed editor alone
+and makes a second, lightweight copy of it (0.5 GB; everything but the tools
+folder is a junction to the real install):
+
+1. Close Unity. In PowerShell 7:
+
+   ```bash
+   pwsh scripts/unity-overlay.ps1 -Editor "C:\Program Files\Unity\Hub\Editor\2022.3.22f1\Editor" -Dest out\unity-overlay
+   ```
+
+2. Move the project's `Library\ShaderCache` folder and `Library\ShaderCache.db`
+   somewhere else. Unity caches compiled variants there whichever compiler
+   made them, failures included, so with the old cache in place most shaders
+   would not be recompiled at all.
+3. Start `out\unity-overlay\Unity.exe -projectPath <project>` and work as
+   usual. Every shader the editor compiles now goes through fxc2. That was
+   tested for the scene view, play mode and the test runner; a player or
+   asset-bundle build uses the same compiler process, but none was made.
+4. To go back: close it, put the cache folder back, start the normal editor.
+   Remove the overlay only with the script's `-Remove` (a plain recursive
+   delete can follow the junctions into the real install).
+
+To patch an editor in place instead (needs admin rights; the same two files
+as the overlay uses, but this way round was not tried): rename
+`<Editor>\Data\Tools\D3DCompiler_47.dll`, then copy both files from
+`bin/unity/` there. The pair is needed because Unity's shader compiler maps
+that DLL with a loader of its own; the 6 KB `D3DCompiler_47.dll` is a stub
+that loads the real compiler, `fxc2_d3dcompiler.dll`, the normal way.
+
+Good to know:
+
+- `#ifdef __FXC2__` tells the compilers apart in shader code.
+- Create `%TEMP%\fxc2.log.on` and every compile is logged to
+  `%TEMP%\fxc2.log` (profile, entry point, result, milliseconds); sources that
+  fail are saved to `%TEMP%\fxc2_fail\` with the messages on top. With
+  `%TEMP%\fxc2.dump.on` every source is saved to `fxc2_all\`, which is what
+  `tools/replay.py` and `tools/shaderbench.py` take.
+- If a shader fails only with fxc2, that saved source plus
+  `python tools/failsrc.py <file>` shows the line.
+- `#pragma skip_optimizations` has no effect (see Costs).
+- Tested with Unity 2022.3.22f1 on two projects (below). Other versions should
+  work the same way; they were not tried.
+
+### Command line
+
+```bash
+bin/fxc2.exe -T ps_5_0 -E main -Fo shader.dxbc shader.hlsl
+```
+
+`/T /E /Fo /Fh /Fc /D /I /Vn /Gec /P` and the rest of the common `fxc.exe`
+switches. Use `-T` rather than `/T` from Git Bash (MSYS rewrites `/T` into a
+path). `python tools/hlsl2dxbc.py` puts Slang or DXC in front for HLSL 2021
+features (see "The routes").
+
+### Any program that calls D3DCompile
+
+Put `bin/d3dcompiler_47.dll` next to the executable. That is how ShaderEmu's
+harness uses it (its `docs/fxc2.md`). Programs that share a shader cache
+between runs need a separate cache per compiler.
+
 ## Short answer
 
 There is exactly one open-source DXBC *code generator*: **vkd3d-shader**, the
@@ -21,24 +164,19 @@ This repo packages that as:
 | `bin/vkd3d-compiler.exe` | Upstream vkd3d CLI (also does DXBC → SPIR-V/GLSL/MSL/asm). |
 | `tools/hlsl2dxbc.py` | Front-end chooser: `direct`, via Slang, via DXC + SPIRV-Cross, or `auto`. |
 | `bin/unity/` | The pair of DLLs Unity needs: a loader-proof stub named `D3DCompiler_47.dll` plus the real compiler as `fxc2_d3dcompiler.dll` (see Unity below). |
-| `patches/` | 45 patches on top of upstream vkd3d (see below); `tools/vkd3d-patch-scripts/` has the scripts they were made with. |
+| `patches/` | 47 patches on top of upstream vkd3d (see below); `tools/vkd3d-patch-scripts/` has the scripts they were made with. |
 | `tools/replay.py` | Recompiles sources the DLL captured (a Unity project's, say) with and without the optimisations and with FXC, and compares. |
 | `shaderemu/rvc_opt-fxc2.patch` | The changes to ShaderEmu's shader described under "The emulator shader" (merged there since). |
 | `tools/unity_render_shaders.cs`, `tools/compare_images.py` | Render every shader in a Unity folder with fxc2 and with the stock compiler, and compare the pictures. |
 | `scripts/unity-overlay.ps1` | Makes a junction-based copy of a Unity editor that compiles with fxc2, leaving the real install untouched. |
 | `tools/failsrc.py` | Shows the source lines behind errors in sources the DLL saved (call tracing, below). |
+| `tools/shaderbench.py`, `tools/shaderbench/` | Times captured shaders on the GPU, FXC's build against fxc2's, without the application (see "Speed of the generated code, shader by shader"). |
 | `tools/se_matrix.py` | Benchmarks ShaderEmu under FXC, DXC or fxc2 with any setting of the tuning switches. |
 | `scripts/build-vkd3d.sh` | Reproducible cross-build of everything in `bin/` from WSL/Linux. |
 
 ```bash
-bin/fxc2.exe -T ps_5_0 -E main -Fo shader.dxbc shader.hlsl
-```
-
-```bash
 python tools/hlsl2dxbc.py shader.hlsl -T ps_5_0 -Fo shader.dxbc
 ```
-
-Use `-T` rather than `/T` from Git Bash (MSYS rewrites `/T` into a path).
 
 ## Tested on real projects
 
@@ -118,34 +256,40 @@ as shipped (plus a test texture and a tinted, dimmed light, so that the picture 
   measured.
 
 **ShaderEmu** (a RISC-V machine in a pixel shader; `rvc_harness --d3d11` with
-`d3dcompiler_47.dll` placed next to the executable).
+`d3dcompiler_47.dll` placed next to the executable). Three shaders, each run
+under both compilers in the same session, 6000 frames at 2,048 emulated
+instructions a frame; the state hash after them is the same for both
+compilers in every row:
 
-| | FXC | fxc2 |
-|---|---|---|
-| `CPUTick` fragment pass, compile time | 533.1 s | 7.8 s |
-| bytecode size of that pass | 348,572 bytes | 530,048 bytes |
-| state hash, 600 fixed-timestep frames | `635acdc94aff149f` | `635acdc94aff149f` |
-| state hash, 6000 frames | `d3384baf5ab1cd3f` | `d3384baf5ab1cd3f` |
-| Linux boot to `/ # `: guest instructions | 42,352,129 | 42,352,129 |
-| Linux boot: console output (7,312 bytes) | | identical |
-| Linux boot: emulation speed | 1,488k IPS | 1,472k IPS |
-| 6000-frame bench: emulation speed | 1,595k IPS | 1,570k IPS |
+| shader | | FXC | fxc2 |
+|---|---|---|---|
+| `experiments/rvc_opt`, as each compiler builds it (fxc2: local arrays, `mulhi`) | compile | 554 s | 9.3 s |
+| | speed | 1,528k IPS | 1,970k IPS |
+| the same with static arrays under fxc2 too (`L1_STATIC`) | speed | | 98 to 99% of FXC's |
+| upstream rvc, unmodified | compile | 405 s | 5.2 s |
+| | speed | 583k IPS | 351k IPS |
 
-So the emulated machine behaves identically, the shader compiles about 70
-times faster, and the same source runs within 1 to 2% of FXC's build. (That
-table is from the first round of code-generation work, patches 14 to 29. With
-the shader changes fxc2 makes possible it is well ahead: see "The emulator
-shader".) Only the upstream `linux` image was booted then; `linux-net` and the
-raytracer were run for the later work.
+A Linux cold boot on `rvc_opt` ends after the same 41,545,138 instructions
+with the same console output under both, in 30.2 s (FXC) and 22.6 s (fxc2).
+The project's `linux-net` image, the raytracer guest and the DXC/D3D12 build
+were run as well; the GPU-device test images were not.
+
+Upstream's shader is the open case: per emulated instruction fxc2's build
+takes 2.5 us against FXC's 1.4, and none of the tuning switches below changes
+that. It compiles only since patch 46 (its `4294967296.0l` literal), so no
+work has gone into it yet.
 
 ## Performance of the generated code
 
-The first build that ran ShaderEmu correctly was 15% slower than FXC's
-(1,350k against 1,580k IPS). It is now within 2%. What was measured, with
-`tools/se_matrix.py` (ShaderEmu's `--bench` mode; repeat runs agree to about
-0.3%, where fps counters and GPU timer queries drifted by several percent):
+This section is the record of tuning on one shader, ShaderEmu's `rvc_opt`
+tick pass, compiled from the same source by both. The first build that ran it
+correctly was 15% slower than FXC's (1,350k against 1,580k IPS); after patches
+14 to 29 it was within 2%, and it has stayed at 98 to 99% since. What was
+measured then, with `tools/se_matrix.py` (ShaderEmu's `--bench` mode; repeat
+runs agree to about 0.3%, where fps counters and GPU timer queries drifted by
+several percent):
 
-| compiler | IPS | fixed cost per frame | per emulated instruction |
+| compiler (at patch 29) | IPS | fixed cost per frame | per emulated instruction |
 |---|---|---|---|
 | DXC, D3D12 | 2,003k | 0.430 ms | 288 ns |
 | FXC, D3D11 | 1,595k | 0.693 ms | 287 ns |
@@ -154,8 +298,9 @@ The first build that ran ShaderEmu correctly was 15% slower than FXC's
 Two things follow from splitting the time that way. DXC's lead on this machine
 is all fixed per-frame cost, which comes from the D3D12 harness and a source
 option (`L1_LOCAL`), not from better code in the emulation loop: per
-instruction DXC and FXC are equal. And fxc2 matches FXC's fixed cost and is
-about 4% behind per instruction.
+instruction DXC and FXC are equal. And fxc2 matched FXC's fixed cost and was
+about 4% behind per instruction. (`L1_LOCAL` is what fxc2 can compile since
+patch 38; current figures are under "The emulator shader".)
 
 What moved the number, and what did not (each switch below turns one thing off
 or changes a limit, so this can be repeated on another GPU):
@@ -242,6 +387,62 @@ The machine these were taken on drifted by up to 8% between sessions (FXC's
 bench figure was 1,595k on one day and 1,493k to 1,536k on another), so only
 numbers from one session are compared with each other.
 
+### Speed of the generated code, shader by shader
+
+`tools/shaderbench.py` takes the sources the DLL captured from an application,
+compiles each with FXC and with fxc2, and times both builds on the GPU in a
+small harness of its own (`tools/shaderbench/`, D3D11, C++): no editor, 550
+shaders in a few minutes once FXC's builds are cached.
+
+```bash
+tools\shaderbench\build.bat
+```
+
+```bash
+python tools/shaderbench.py out/unity_sources out/poiyomi_sources --csv out/shaderbench.csv
+```
+
+Each shader gets whatever it reads made up from its reflection data, the same
+for both builds: constant buffers filled by variable name and type (floats
+0.25 to 0.75, matrices near identity, integers 1 to 3), small noise textures,
+zeroed buffers. Pixel shaders are timed per pixel on a 1024 x 1024 target,
+vertex shaders per vertex over 65,536 points a draw, and each pixel shader's
+output is compared between the builds. Geometry, hull, domain and compute
+shaders are not run.
+
+What that can and cannot tell: it compares two builds of a shader on one path
+through it. Which branch a material property selects is down to the made-up
+value, so this is not what a frame costs in the application; and a shader that
+does little sits at the cost of drawing at all (the "floor": 0.031 ns a pixel,
+0.19 ns a vertex), where no compiler can differ.
+
+| shaders (time of fxc2's build / FXC's, geometric mean) | measured | all | those at least 3x the floor |
+|---|---|---|---|
+| VRCFluid project and Unity's own, pixel | 151 | 0.99 | 1.00 (5 shaders) |
+| VRCFluid project and Unity's own, vertex | 139 | 1.00 | |
+| Poiyomi Toon variants, pixel | 101 | 1.05 | 1.085 (65 shaders) |
+| Poiyomi Toon variants, vertex | 89 | 1.02 | |
+| Poiyomi pixel, against FXC with optimisation skipped (what the editor runs for unlocked materials) | 84 | 0.93 | 0.91 (65 shaders) |
+
+So on this project's shaders with these inputs there is nothing between the
+compilers, mostly because few of them do enough to measure. On Poiyomi's,
+which do, fxc2's code is 8% slower than FXC's optimised code in the mean (41
+of 65 slower, 20 faster; from 0.84x to 1.53x) and 9% faster than what FXC
+produces when told not to optimise. The slowest family (2.0 against 3.0 ns a
+pixel) is where to look next.
+
+Pixel shader output: 248 of 252 the same to 0.1%. Of the four that differ, one
+is Unity's UI shader (twice), whose gradient lookup multiplies sampled values
+up to 65,000 and uses the result as a texture coordinate, so that a
+last-bit difference moves the sample; one agrees with FXC's unoptimised build
+and differs from its optimised one; one differs in 0.1% of pixels by 0.003.
+None was traced to a wrong instruction, and only the first was traced at all.
+
+Not measured: 46 geometry and tessellation shaders, 27 vertex shaders that
+feed those stages, one shader whose inputs the generated vertex shader did not
+match, and two pixel shaders that hung the GPU on the made-up inputs (the
+harness carries on after a device reset).
+
 One difference from FXC found on the way: for a `switch` whose only label is
 `default`, FXC drops the body entirely (the test returned 0 where the source
 adds 0.0625); vkd3d executes it. That is left as it is.
@@ -251,10 +452,10 @@ adds 0.0625); vkd3d executes it. That is left as it is.
 Measured on this machine by `tests/run.py`, `tests/bench.py` and
 `tests/features.py`; FXC 10.0.26100 is the reference.
 
-**Correctness.** All 24 test shaders compile (22 directly, one each through
-the Slang and DXC routes). The 23 that target SM4+ are accepted by the D3D11
+**Correctness.** All 26 test shaders compile (24 directly, one each through
+the Slang and DXC routes). The 25 that target SM4+ are accepted by the D3D11
 runtime, on WARP and on the hardware GPU (`--gpu`); the SM3 one is only checked
-to compile, nothing loads it into D3D9. The 17 pixel shaders with
+to compile, nothing loads it into D3D9. The 19 pixel shaders with
 a render check produce the same image as the FXC build (max channel difference
 1.2e-4 on the GPU, float rounding), and the compute shader leaves bit-identical
 buffer contents.
@@ -263,27 +464,31 @@ buffer contents.
 
 | shader | fxc2 | fxc | speedup | fxc2 insns | fxc insns |
 |---|---|---|---|---|---|
-| raymarch_ps | 0.03s | 0.09s | 2.9x | 509 | 289 |
-| matrix_ps | 0.03s | 0.05s | 1.7x | 230 | 144 |
-| blur 31x31 (nested constant loops) | 0.01s | 0.03s | 2.2x | 54 | 29 |
-| call chain x8 (generated) | 0.04s | 0.58s | 15.5x | 1709 | 900 |
-| call chain x12 (generated) | 0.76s | 118.01s | 154.6x | 12013 | 6386 |
+| raymarch_ps | 0.03s | 0.08s | 2.8x | 339 | 289 |
+| matrix_ps | 0.02s | 0.04s | 1.9x | 161 | 144 |
+| blur 7x7 | 0.01s | 0.02s | 1.9x | 76 | 29 |
+| blur 31x31 (nested constant loops) | 0.01s | 0.03s | 2.8x | 29 | 29 |
+| call chain x8 (generated) | 0.08s | 0.60s | 7.8x | 1417 | 900 |
+| call chain x12 (generated) | 3.05s | 106.97s | 35.1x | 9872 | 6386 |
 
-**Generated code.** vkd3d's optimiser is much weaker than FXC's: 1.5–4x as many
-DXBC instructions (redundant `mov`s, scalarised matrix math). In the benchmark
-that did not show up at run time, because the driver recompiles DXBC anyway:
+The optimisation passes cost time of their own: the call chain took 0.76 s
+before they existed.
 
-| shader, 2048x2048 fullscreen draw on the GPU | fxc2 code | fxc code | ratio |
+**Generated code** in the same micro-benchmark, a 2048 x 2048 fullscreen draw:
+
+| shader | fxc2 code | fxc code | ratio |
 |---|---|---|---|
-| raymarch_ps | 7.1 ms | 7.3 ms | 0.98x |
-| blur 31x31 | 27.6 ms | 28.1 ms | 0.98x |
-| call chain x8 | 11.2 ms | 10.4 ms | 1.08x |
-| call chain x12 | 192.4 ms | 185.6 ms | 1.04x |
+| raymarch_ps | 8.4 ms | 7.2 ms | 1.16x |
+| matrix_ps | 6.6 ms | 6.0 ms | 1.10x |
+| blur 7x7 | 7.0 ms | 7.9 ms | 0.89x |
+| blur 31x31 | 26.5 ms | 26.6 ms | 1.00x |
+| call chain x8 | 11.8 ms | 10.4 ms | 1.13x |
+| call chain x12 | 187.3 ms | 182.7 ms | 1.03x |
 
 The draw went to the system's default adapter (this laptop has both an Intel
-UHD and an RTX 5070; the harness does not pick between them), and the cheap
-shaders are dominated by fixed per-draw overhead, so read this as "no large
-regression seen", not as a precise measurement.
+UHD and an RTX 5070; this older script does not pick between them) and is a
+single short measurement, so it is coarse. "Speed of the generated code,
+shader by shader" above is the better instrument and the larger sample.
 
 **HLSL coverage** (82 feature probes, full table in
 [docs/features.md](docs/features.md)): direct 71, via Slang 64, via DXC 63, at
@@ -414,6 +619,13 @@ Patches 30 to 42:
 45. Compile time on very large shaders: the search for expressions to put in one vector
     instruction compared each with every group found so far, and one flattening check read the
     environment for every load and store. Together a third of the time on a Poiyomi variant.
+46. The `l` suffix on floating point literals (`4294967296.0l`), which the preprocessor split
+    off as a token of its own. Upstream rvc's shader needs it. The value is still held in
+    single precision.
+47. **`float - uint` was wrong** (upstream): `a - b` is built as `a + (-b)`, and the negation
+    was done in `b`'s type before the conversion, so an unsigned 3 became 4294967293.0.
+    ShaderEmu's terminal shader (`at - cell`, a `uint2`) showed it in Unity; it is
+    `tests/shaders/terminal_ps.hlsl` now.
 
 ## Approaches that do not work
 
@@ -427,29 +639,15 @@ Patches 30 to 42:
   `d3dcompiler_47.dll`. It only becomes FXC-free with the drop-in DLL.
 - **Mesa.** Its D3D back end produces DXIL only.
 
-## Unity
+## Unity: why two DLLs
 
+How to set it up is under "How to use it". The reason for the pair of files:
 Unity's `UnityShaderCompiler.exe` does not `LoadLibrary` its
 `Data\Tools\D3DCompiler_47.dll`. It maps the file with a private loader, and a
 normal MinGW-built DLL crashes it at start-up. `bin/unity/D3DCompiler_47.dll` is
 therefore a 6 KB stub with no C runtime and no imports: it finds the real
 `kernel32` through the PEB, loads `fxc2_d3dcompiler.dll` from the same folder
 with the regular Windows loader, and forwards every call.
-
-Unity's install folder needs admin rights to modify, so the tested route is an
-overlay copy (run it with PowerShell 7, `pwsh`):
-
-```bash
-pwsh scripts/unity-overlay.ps1 -Editor "C:\Program Files\Unity\Hub\Editor\2022.3.22f1\Editor" -Dest out\unity-overlay
-```
-
-Then start `out\unity-overlay\Unity.exe -projectPath <project>`. Remove it only
-with `-Remove`: the folder is full of junctions into the real install, and a
-plain recursive delete can follow them.
-
-Unity caches compiled variants in `Library/ShaderCache` regardless of which
-compiler produced them, **including failures**, so move that folder aside to
-actually exercise fxc2, and restore it to go back.
 
 ## Call tracing
 
