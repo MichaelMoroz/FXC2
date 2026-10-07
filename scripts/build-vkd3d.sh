@@ -45,12 +45,14 @@ for f in D3DCompile D3DCompile2 D3DReflect D3DGetBlobPart D3DStripShader D3DDisa
 done
 
 mkdir -p "$BUILD" && cd "$BUILD"
+# VKD3D_NO_TRACE_MESSAGES: TRACE() evaluates its arguments even when tracing is
+# off, and some of them format strings in the compiler's hottest loops.
 # SONAME_LIBVULKAN skips the link check for vulkan-1; we never build libvkd3d.
 [ -f Makefile ] || "$SRC/configure" --host="$HOST" \
     --disable-shared --enable-static \
     --disable-tests --disable-demos --disable-doxygen-doc \
     --without-xcb --without-ncurses --without-opengl \
-    CPPFLAGS="-I$XINC $RENAMES" CFLAGS="-O2 -g0" LDFLAGS="-static" \
+    CPPFLAGS="-I$XINC $RENAMES -DVKD3D_NO_TRACE_MESSAGES" CFLAGS="-O2 -g0" LDFLAGS="-static" \
     SONAME_LIBVULKAN=vulkan-1.dll
 
 # Plain "make" (not a single target) so BUILT_SOURCES (widl headers) get generated.

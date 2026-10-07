@@ -1,0 +1,32 @@
+From e48c334b62250dd1275abb4ff50962fad20b131d Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Wed, 7 Oct 2026 07:27:35 +0200
+Subject: [PATCH 13/13] vkd3d-common: Make VKD3D_NO_TRACE_MESSAGES builds
+ compile.
+
+---
+ include/private/vkd3d_common.h | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/include/private/vkd3d_common.h b/include/private/vkd3d_common.h
+index 513b1b14..de2a17a6 100644
+--- a/include/private/vkd3d_common.h
++++ b/include/private/vkd3d_common.h
+@@ -129,7 +129,13 @@ static inline uint64_t align(uint64_t addr, size_t alignment)
+ 
+ #ifdef VKD3D_NO_TRACE_MESSAGES
+ #define TRACE(args...) do { } while (0)
+-#define TRACE_(ch, args...) do { } while (0)
++/* fxc2: channel traces are written TRACE_(channel)(format, ...), which the
++ * two-argument form upstream has here does not expand; a build with
++ * VKD3D_NO_TRACE_MESSAGES did not compile. */
++#define TRACE_(ch) while (0) vkd3d_dbg_printf_noop
++static inline void vkd3d_dbg_printf_noop(const char *format, ...)
++{
++}
+ #define TRACE_ON() (false)
+ #define TRACE_ON_(ch) (false)
+ #define TRACE_TEXT(text, size) do { } while (0)
+-- 
+2.53.0
+

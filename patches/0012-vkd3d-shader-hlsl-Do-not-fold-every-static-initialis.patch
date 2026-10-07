@@ -1,0 +1,43 @@
+From 1b98164c1d88b323fb6eb3c66a3e81198c2741d9 Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Wed, 7 Oct 2026 07:26:00 +0200
+Subject: [PATCH 12/13] vkd3d-shader/hlsl: Do not fold every static initialiser
+ to evaluate a literal expression.
+
+---
+ libs/vkd3d-shader/hlsl.y | 19 +++++++++++++++++--
+ 1 file changed, 17 insertions(+), 2 deletions(-)
+
+diff --git a/libs/vkd3d-shader/hlsl.y b/libs/vkd3d-shader/hlsl.y
+index 81e9e265..0ae2fd9d 100644
+--- a/libs/vkd3d-shader/hlsl.y
++++ b/libs/vkd3d-shader/hlsl.y
+@@ -644,8 +644,23 @@ static struct hlsl_default_value evaluate_static_expression(struct hlsl_ctx *ctx
+         hlsl_error(ctx, &node_from_block(block)->loc, VKD3D_SHADER_ERROR_HLSL_INVALID_SYNTAX,
+                 "Expected literal expression.");
+ 
+-    if (!hlsl_clone_block(ctx, &expr, &ctx->static_initializers))
+-        return ret;
++    /* fxc2: the initialisers of every static variable are only needed when
++     * the expression reads a variable. Cloning and folding them for each case
++     * label and array size made parsing a large shader take tens of seconds. */
++    {
++        bool reads_variable = false;
++
++        LIST_FOR_EACH_ENTRY(node, &block->instrs, struct hlsl_ir_node, entry)
++        {
++            if (node->type != HLSL_IR_CONSTANT && node->type != HLSL_IR_EXPR && node->type != HLSL_IR_SWIZZLE)
++                reads_variable = true;
++        }
++
++        if (!reads_variable)
++            hlsl_block_init(&expr);
++        else if (!hlsl_clone_block(ctx, &expr, &ctx->static_initializers))
++            return ret;
++    }
+     hlsl_block_add_block(&expr, block);
+ 
+     node = add_implicit_conversion(ctx, &expr, node_from_block(&expr), dst_type, loc);
+-- 
+2.53.0
+

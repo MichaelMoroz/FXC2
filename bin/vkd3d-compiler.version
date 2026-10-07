@@ -10,3 +10,5 @@ vkd3d-2.1-93-gcfcb4833
 0009-vkd3d-shader-hlsl-Accept-attributes-on-plain-stateme.patch
 0010-vkd3d-shader-hlsl-Lower-stores-to-a-vector-component.patch
 0011-vkd3d-shader-Scalar-double-precision-for-shader-mode.patch
+0012-vkd3d-shader-hlsl-Do-not-fold-every-static-initialis.patch
+0013-vkd3d-common-Make-VKD3D_NO_TRACE_MESSAGES-builds-com.patch
