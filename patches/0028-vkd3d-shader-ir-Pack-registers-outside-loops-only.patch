@@ -1,7 +1,7 @@
 From 0209f2e59d492f8f5daf7d24a507dcc1ea180d73 Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 08:54:42 +0200
-Subject: [PATCH 28/39] vkd3d-shader/ir: Pack registers outside loops only.
+Subject: [PATCH 28/41] vkd3d-shader/ir: Pack registers outside loops only.
 
 ---
  libs/vkd3d-shader/ir.c | 56 +++++++++++++++++++++++++++++++++---------

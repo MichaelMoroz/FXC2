@@ -1,0 +1,139 @@
+From fb241282baaa66d7300cf05843bfdf0611620aa3 Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Wed, 7 Oct 2026 20:22:18 +0200
+Subject: [PATCH 40/41] vkd3d-shader/hlsl: Reset per-variable pass state from
+ the code, not the scopes.
+
+---
+ libs/vkd3d-shader/hlsl.h         |  2 +-
+ libs/vkd3d-shader/hlsl_codegen.c | 64 +++++++++++++++++++++++++++++---
+ 2 files changed, 60 insertions(+), 6 deletions(-)
+
+diff --git a/libs/vkd3d-shader/hlsl.h b/libs/vkd3d-shader/hlsl.h
+index 8c4b8187..1377135d 100644
+--- a/libs/vkd3d-shader/hlsl.h
++++ b/libs/vkd3d-shader/hlsl.h
+@@ -564,7 +564,7 @@ struct hlsl_ir_var
+      * on the representative, the variable that will stand for them all and
+      * whether the set does not qualify. */
+     struct hlsl_ir_var *alias_parent, *alias_root;
+-    bool alias_member, alias_invalid;
++    bool alias_member, alias_invalid, alias_checked;
+     /* fxc2: for adce_split_live_ranges(): whether the variable was referenced
+      * yet, and the variable that stands for it from here on. */
+     bool adce_seen;
+diff --git a/libs/vkd3d-shader/hlsl_codegen.c b/libs/vkd3d-shader/hlsl_codegen.c
+index a4782a3a..4ff2bfbd 100644
+--- a/libs/vkd3d-shader/hlsl_codegen.c
++++ b/libs/vkd3d-shader/hlsl_codegen.c
+@@ -7699,6 +7699,43 @@ static void adce_split_live_ranges(struct hlsl_ctx *ctx, struct hlsl_block *body
+     }
+ }
+ 
++static void adce_reset_var(struct hlsl_ir_var *var)
++{
++    if (!var)
++        return;
++    var->adce_store_count = 0;
++    var->adce_live = false;
++    var->adce_seen = false;
++    var->adce_rename = NULL;
++}
++
++/* Not every variable is in a scope's list; go by what the code refers to. */
++static bool adce_reset(struct hlsl_ctx *ctx, struct hlsl_ir_node *instr, void *context)
++{
++    switch (instr->type)
++    {
++        case HLSL_IR_LOAD:
++            adce_reset_var(hlsl_ir_load(instr)->src.var);
++            break;
++        case HLSL_IR_STORE:
++            adce_reset_var(hlsl_ir_store(instr)->lhs.var);
++            break;
++        case HLSL_IR_RESOURCE_LOAD:
++            adce_reset_var(hlsl_ir_resource_load(instr)->resource.var);
++            adce_reset_var(hlsl_ir_resource_load(instr)->sampler.var);
++            break;
++        case HLSL_IR_RESOURCE_STORE:
++            adce_reset_var(hlsl_ir_resource_store(instr)->resource.var);
++            break;
++        case HLSL_IR_INTERLOCKED:
++            adce_reset_var(hlsl_ir_interlocked(instr)->dst.var);
++            break;
++        default:
++            break;
++    }
++    return false;
++}
++
+ static bool adce_execute(struct hlsl_ctx *ctx, struct hlsl_block *body)
+ {
+     struct adce_state state = {0};
+@@ -7715,12 +7752,10 @@ static bool adce_execute(struct hlsl_ctx *ctx, struct hlsl_block *body)
+     {
+         LIST_FOR_EACH_ENTRY(var, &scope->vars, struct hlsl_ir_var, scope_entry)
+         {
+-            var->adce_store_count = 0;
+-            var->adce_live = false;
+-            var->adce_seen = false;
+-            var->adce_rename = NULL;
++            adce_reset_var(var);
+         }
+     }
++    hlsl_transform_ir(ctx, adce_reset, body, NULL);
+ 
+     if ((split = hlsl_tuning_enabled("VKD3D_HLSL_SPLIT_RANGES", true)))
+         adce_split_live_ranges(ctx, body);
+@@ -18453,6 +18488,22 @@ static bool alias_is_copy(const struct hlsl_ir_node *instr)
+             && hlsl_types_are_equal(store->lhs.var->data_type, load->src.var->data_type);
+ }
+ 
++static bool alias_reset(struct hlsl_ctx *ctx, struct hlsl_ir_node *instr, void *context)
++{
++    struct hlsl_ir_var *var = NULL;
++
++    if (instr->type == HLSL_IR_LOAD)
++        var = hlsl_ir_load(instr)->src.var;
++    else if (instr->type == HLSL_IR_STORE)
++        var = hlsl_ir_store(instr)->lhs.var;
++    if (var)
++    {
++        var->alias_parent = var->alias_root = NULL;
++        var->alias_member = var->alias_invalid = var->alias_checked = false;
++    }
++    return false;
++}
++
+ static bool alias_collect(struct hlsl_ctx *ctx, struct hlsl_ir_node *instr, void *context)
+ {
+     struct hlsl_ir_var *a, *b;
+@@ -18509,7 +18560,8 @@ static bool alias_apply(struct hlsl_ctx *ctx, struct hlsl_ir_node *instr, void *
+     else
+         return false;
+ 
+-    if (!deref->var->alias_member || (set = alias_find(deref->var))->alias_invalid || !set->alias_root)
++    if (!deref->var->alias_member || (set = alias_find(deref->var))->alias_invalid || !set->alias_root
++            || !deref->var->alias_checked)
+         return false;
+ 
+     if (instr->type == HLSL_IR_STORE && !deref->path_len && hlsl_ir_store(instr)->rhs.node->adce_live)
+@@ -18541,6 +18593,7 @@ static void alias_inout_arrays(struct hlsl_ctx *ctx, struct hlsl_block *body)
+         }
+     }
+ 
++    hlsl_transform_ir(ctx, alias_reset, body, NULL);
+     hlsl_transform_ir(ctx, alias_collect, body, NULL);
+     hlsl_transform_ir(ctx, alias_validate, body, NULL);
+ 
+@@ -18552,6 +18605,7 @@ static void alias_inout_arrays(struct hlsl_ctx *ctx, struct hlsl_block *body)
+                 continue;
+             set = alias_find(var);
+             any = true;
++            var->alias_checked = true;
+ 
+             if (!var->is_param)
+             {
+-- 
+2.53.0
+

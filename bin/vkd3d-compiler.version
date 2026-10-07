@@ -38,3 +38,5 @@ vkd3d-2.1-93-gcfcb4833
 0037-vkd3d-shader-ir-Forward-values-that-are-stored-and-u.patch
 0038-vkd3d-shader-hlsl-Pass-inout-arrays-by-reference-whe.patch
 0039-vkd3d-shader-preproc-Predefine-__FXC2__.patch
+0040-vkd3d-shader-hlsl-Reset-per-variable-pass-state-from.patch
+0041-vkd3d-shader-hlsl-Do-not-vectorise-stores-early-afte.patch

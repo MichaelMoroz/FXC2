@@ -1,7 +1,7 @@
 From f1a09e078617d6d30156cc912e2dd7761e445b57 Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 18:55:42 +0200
-Subject: [PATCH 37/39] vkd3d-shader/ir: Forward values that are stored and
+Subject: [PATCH 37/41] vkd3d-shader/ir: Forward values that are stored and
  used, and copies of variables as far as they hold.
 
 ---
