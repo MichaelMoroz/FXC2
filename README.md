@@ -20,7 +20,10 @@ This repo packages that as:
 | `bin/d3dcompiler_47.dll` | Drop-in replacement for Microsoft's DLL (`D3DCompile`, `D3DCompile2`, `D3DCompileFromFile`, `D3DPreprocess`, `D3DReflect`, `D3DDisassemble`, `D3DStripShader`, ...). Anything that loads `d3dcompiler_47.dll` compiles through vkd3d instead. |
 | `bin/vkd3d-compiler.exe` | Upstream vkd3d CLI (also does DXBC → SPIR-V/GLSL/MSL/asm). |
 | `tools/hlsl2dxbc.py` | Front-end chooser: `direct`, via Slang, via DXC + SPIRV-Cross, or `auto`. |
-| `patches/` | Three small patches on top of upstream vkd3d (see below). |
+| `bin/unity/` | The pair of DLLs Unity needs: a loader-proof stub named `D3DCompiler_47.dll` plus the real compiler as `fxc2_d3dcompiler.dll` (see Unity below). |
+| `patches/` | 13 patches on top of upstream vkd3d (see below). |
+| `scripts/unity-overlay.ps1` | Makes a junction-based copy of a Unity editor that compiles with fxc2, leaving the real install untouched. |
+| `tools/failsrc.py` | Shows the source lines behind errors in sources the DLL saved (call tracing, below). |
 | `scripts/build-vkd3d.sh` | Reproducible cross-build of everything in `bin/` from WSL/Linux. |
 
 ```bash
@@ -33,15 +36,50 @@ python tools/hlsl2dxbc.py shader.hlsl -T ps_5_0 -Fo shader.dxbc
 
 Use `-T` rather than `/T` from Git Bash (MSYS rewrites `/T` into a path).
 
+## Tested on real projects
+
+**Unity 2022.3 (D3D11), VRCFluid project.** Run through an overlay editor
+(`scripts/unity-overlay.ps1`) with a shader cache built only by fxc2.
+
+- All 154 passes of the project's 73 shaders compile: 425 `D3DCompile` calls,
+  0 failures.
+- The project's EditMode suite, which compares real shader output with an
+  independent CPU reference: 443 of 444 pass, including all 276 `VRCFluidTests`.
+  The stock compiler gives the same 443 of 444; the one failure
+  (`GraphNodeTests.CheckHelpURLsForSystemNodes`) is a VRChat SDK test that fails
+  either way.
+- An edit-mode render of the scene differs from the stock-compiler render by at
+  most 3/255 per channel. In play mode the fluid simulates and renders (water
+  in the hot tub and on the slide, about 88 fps); that was judged by eye only,
+  no stock play-mode capture was taken to compare against.
+
+**ShaderEmu** (a RISC-V machine in a pixel shader; `rvc_harness --d3d11` with
+`d3dcompiler_47.dll` placed next to the executable).
+
+| | FXC | fxc2 |
+|---|---|---|
+| `CPUTick` fragment pass, compile time | 533.1 s | 6.3 s |
+| bytecode size of that pass | 348,572 bytes | 520,608 bytes |
+| state hash after 600 fixed-timestep frames | `635acdc94aff149f` | `635acdc94aff149f` |
+| Linux boot to `/ # `: guest instructions | 42,352,129 | 42,352,129 |
+| Linux boot: console output (7,312 bytes) | | identical |
+| Linux boot: emulation speed | 1,428k IPS | 1,201k IPS |
+| 600-frame bench: emulation speed | 1,398k IPS | 1,324k IPS |
+
+So the emulated machine behaves identically, the shader compiles about 85
+times faster, and it runs 5 to 16% slower. Only the upstream `linux` image was
+booted; the project's own `linux-net` image and the GPU-device test images
+were not run.
+
 ## Results
 
 Measured on this machine by `tests/run.py`, `tests/bench.py` and
 `tests/features.py`; FXC 10.0.26100 is the reference.
 
-**Correctness.** All 12 test shaders compile (10 directly, one each through
-the Slang and DXC routes). The 11 that target SM4+ are accepted by the D3D11
+**Correctness.** All 17 test shaders compile (15 directly, one each through
+the Slang and DXC routes). The 16 that target SM4+ are accepted by the D3D11
 runtime, on WARP and on the hardware GPU (`--gpu`); the SM3 one is only checked
-to compile, nothing loads it into D3D9. The four pixel shaders with
+to compile, nothing loads it into D3D9. The nine pixel shaders with
 a render check produce the same image as the FXC build (max channel difference
 1.2e-4 on the GPU, float rounding), and the compute shader leaves bit-identical
 buffer contents.
@@ -73,8 +111,8 @@ shaders are dominated by fixed per-draw overhead, so read this as "no large
 regression seen", not as a precise measurement.
 
 **HLSL coverage** (82 feature probes, full table in
-[docs/features.md](docs/features.md)): direct 68, via Slang 62, via DXC 62, at
-least one route 73.
+[docs/features.md](docs/features.md)): direct 70, via Slang 64, via DXC 63, at
+least one route 75.
 
 ## The routes
 
@@ -92,34 +130,59 @@ HLSL, so anything the vkd3d back end cannot express fails on every route.
 
 ### Things no route compiles today
 
-`double`; `EvaluateAttribute*` / `GetRenderTargetSample*`;
+`EvaluateAttribute*` / `GetRenderTargetSample*`;
 `CalculateLevelOfDetail`; `GetDimensions` on structured buffers;
 `IncrementCounter`/`DecrementCounter`; `Append`/`ConsumeStructuredBuffer`;
 `RWByteAddressBuffer.Interlocked*` (the free-function form on `RWBuffer`,
-`RWTexture` and `RWStructuredBuffer` elements works); `[instance(n)]` geometry
-shaders; `SV_Coverage`.
+`RWTexture` and `RWStructuredBuffer` elements works); `SV_Coverage` as a pixel
+shader input. Doubles are scalar only, with `+ - * /`, negation and
+conversions; double vectors and comparisons are reported as unimplemented.
 
 Direct-only gaps that a front end fixes: struct member functions, namespaces,
 interfaces/classes, templates, operator overloading.
 
 ## Patches carried on vkd3d
 
-Upstream is pinned at `vkd3d-2.1-93-gcfcb4833`.
+Upstream is pinned at `vkd3d-2.1-93-gcfcb4833`. None of these have been sent
+upstream. Each one was needed by a test shader, Unity or ShaderEmu, and each
+behaviour change was checked against FXC by executing both builds.
 
 1. **No speculative loop unrolling for SM4+.** Upstream tries to unroll every
-   loop up to 254 iterations to mimic FXC. On the raymarch test that meant
-   3 min 56 s and a 3.6 MB shader, against 0.03 s and 12 KB with the loops
-   kept. Loops marked `[unroll]` are still unrolled. Because a few shaders are
-   only valid when unrolled (a loop counter selecting a texture from an array,
-   or used as a texel offset), `fxc2.exe` and the DLL retry a failed compile
-   with unrolling enabled. `-unroll <n>` or `VKD3D_HLSL_IMPLICIT_UNROLL_LIMIT`
-   forces a limit.
-2. **`isnan`, `isfinite`, `reversebits`** intrinsics.
-3. **UAV read methods**: `Load`/`Load2-4` on `RWByteAddressBuffer`, `Load` and
-   `GetDimensions` on RW textures/buffers, `Load` on structured buffers. This
-   includes a fix for raw UAV loads being emitted as `ld_uav_typed`.
-
-None of these have been sent upstream.
+   loop up to 254 iterations to mimic FXC: 3 min 56 s and a 3.6 MB shader on
+   the raymarch test, against 0.03 s and 12 KB with the loops kept. Loops
+   marked `[unroll]` are still unrolled. Shaders that are only valid once
+   unrolled (a loop counter selecting a texture, or used as a texel offset)
+   are retried with unrolling by `fxc2.exe` and the DLL. `-unroll <n>` or
+   `VKD3D_HLSL_IMPLICIT_UNROLL_LIMIT` forces a limit.
+2. `isnan`, `isfinite`, `reversebits`.
+3. UAV read methods (`Load*` on `RWByteAddressBuffer`, `Load`/`GetDimensions`
+   on RW textures and buffers, `Load` on structured buffers), including a fix
+   for raw UAV loads being emitted as `ld_uav_typed`.
+4. For Unity: `SV_InstanceID`/`SV_VertexID` passed between stages,
+   `SV_DepthLessEqual`/`SV_DepthGreaterEqual`, `[instance(n)]` geometry
+   shaders, and `GetRenderTargetSampleCount()` in helpers that non-pixel stages
+   never call.
+5. `float - bool` and `-bool` (negating a bool yields an int).
+6. `firstbithigh`/`firstbitlow` under shader model 4, which has no bit-scan
+   instructions.
+7. **Exponential compile time**: `evaluate_conditionals_recurse()` walked shared
+   expression graphs as trees. One Unity variant went from over 3 minutes to
+   0.6 s with the recursion bounded.
+8. Preprocessor: the result of `##` is looked up as a macro again
+   (`#define GET(x) (v >> SHIFT_##x)`).
+9. Attributes such as `[branch]` in front of plain statements are accepted and
+   ignored; a `switch` case may end in an `if` whose branches both leave it.
+10. Stores to a vector component chosen at run time (`v[i] = x` in a real loop).
+11. Scalar `double` for shader model 5 (`ftod`, `dadd`, `dmul`, `ddiv`, `dtof`,
+    `dtoi`, `dtou`, `itod`, `utod`), with the feature flags D3D11 requires.
+    `floor()` and friends on a double are computed in single precision, as FXC
+    does.
+12. **Parse time**: every `case` label and array size cloned and folded all of
+    the shader's static initialisers. ShaderEmu's trivial vertex shader went
+    from 21.6 s to 0.2 s.
+13. `VKD3D_NO_TRACE_MESSAGES` builds did not compile. The build uses it because
+    trace calls evaluate their arguments, string formatting included, even when
+    tracing is off.
 
 ## Approaches that do not work
 
@@ -132,6 +195,40 @@ None of these have been sent upstream.
 - **Slang's own `-target dxbc`.** It generates HLSL and calls
   `d3dcompiler_47.dll`. It only becomes FXC-free with the drop-in DLL.
 - **Mesa.** Its D3D back end produces DXIL only.
+
+## Unity
+
+Unity's `UnityShaderCompiler.exe` does not `LoadLibrary` its
+`Data\Tools\D3DCompiler_47.dll`. It maps the file with a private loader, and a
+normal MinGW-built DLL crashes it at start-up. `bin/unity/D3DCompiler_47.dll` is
+therefore a 6 KB stub with no C runtime and no imports: it finds the real
+`kernel32` through the PEB, loads `fxc2_d3dcompiler.dll` from the same folder
+with the regular Windows loader, and forwards every call.
+
+Unity's install folder needs admin rights to modify, so the tested route is an
+overlay copy (run it with PowerShell 7, `pwsh`):
+
+```bash
+pwsh scripts/unity-overlay.ps1 -Editor "C:\Program Files\Unity\Hub\Editor\2022.3.22f1\Editor" -Dest out\unity-overlay
+```
+
+Then start `out\unity-overlay\Unity.exe -projectPath <project>`. Remove it only
+with `-Remove`: the folder is full of junctions into the real install, and a
+plain recursive delete can follow them.
+
+Unity caches compiled variants in `Library/ShaderCache` regardless of which
+compiler produced them, **including failures**, so move that folder aside to
+actually exercise fxc2, and restore it to go back.
+
+## Call tracing
+
+Set `FXC2_LOG=<file>`, or create `%TEMP%\fxc2.log.on` for hosts whose
+environment is awkward to change, and the DLL logs every compile (profile,
+entry point, flags, result, milliseconds). Sources that fail are saved to
+`fxc2_fail\` next to the log with the compiler's messages on top, and ones
+that take more than two seconds to `fxc2_slow\`. `python tools/failsrc.py
+<saved file>` prints the offending source lines, following `#line` directives.
+This is how every Unity and ShaderEmu gap above was found.
 
 ## Building
 
