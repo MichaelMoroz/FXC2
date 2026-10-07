@@ -31,12 +31,17 @@ HRESULT WINAPI vkd3d_D3DPreprocess(const void *data, SIZE_T size, const char *fi
  * ones that take more than two seconds in fxc2_slow\. */
 static char log_path[MAX_PATH];
 static LONG fail_index;
+/* With FXC2_DUMP set, or %TEMP%\fxc2.dump.on present, every source is saved
+ * as well, in fxc2_all\, so that a host's whole workload can be replayed. */
+static BOOL dump_all;
 
 static void log_init(void)
 {
     char temp[MAX_PATH], marker[MAX_PATH];
     const char *env = getenv("FXC2_LOG");
 
+    if (getenv("FXC2_DUMP"))
+        dump_all = TRUE;
     if (env && *env)
     {
         snprintf(log_path, sizeof(log_path), "%s", env);
@@ -47,6 +52,9 @@ static void log_init(void)
     snprintf(marker, sizeof(marker), "%sfxc2.log.on", temp);
     if (GetFileAttributesA(marker) != INVALID_FILE_ATTRIBUTES)
         snprintf(log_path, sizeof(log_path), "%sfxc2.log", temp);
+    snprintf(marker, sizeof(marker), "%sfxc2.dump.on", temp);
+    if (GetFileAttributesA(marker) != INVALID_FILE_ATTRIBUTES)
+        dump_all = TRUE;
 }
 
 static void log_line(const char *format, ...)
@@ -72,7 +80,7 @@ static void log_line(const char *format, ...)
 }
 
 static void save_source(const char *kind, const void *data, SIZE_T size, const char *profile, const char *entry,
-        ID3DBlob *messages)
+        UINT flags, ID3DBlob *messages)
 {
     char dir[MAX_PATH], path[MAX_PATH + 64], *slash;
     LONG index;
@@ -92,6 +100,7 @@ static void save_source(const char *kind, const void *data, SIZE_T size, const c
     if (!(f = fopen(path, "wb")))
         return;
     fprintf(f, "// entry: %s\n", entry ? entry : "(null)");
+    fprintf(f, "// flags: %#x\n", flags);
     if (messages)
         fprintf(f, "/*\n%s\n*/\n", (const char *)ID3D10Blob_GetBufferPointer(messages));
     fwrite(data, 1, size, f);
@@ -134,9 +143,11 @@ HRESULT WINAPI D3DCompile2(const void *data, SIZE_T data_size, const char *filen
     log_line("D3DCompile %s %s flags=%#x size=%lu hr=%#lx %lums", profile ? profile : "(null)",
             entrypoint ? entrypoint : "(null)", flags, (unsigned long)data_size, hr, elapsed);
     if (FAILED(hr))
-        save_source("fxc2_fail", data, data_size, profile, entrypoint, messages);
+        save_source("fxc2_fail", data, data_size, profile, entrypoint, flags, messages);
     else if (elapsed > 2000)
-        save_source("fxc2_slow", data, data_size, profile, entrypoint, messages);
+        save_source("fxc2_slow", data, data_size, profile, entrypoint, flags, messages);
+    if (dump_all)
+        save_source("fxc2_all", data, data_size, profile, entrypoint, flags, NULL);
     if (error_messages)
         *error_messages = messages;
     else if (messages)

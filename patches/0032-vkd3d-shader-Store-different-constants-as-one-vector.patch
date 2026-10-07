@@ -1,0 +1,125 @@
+From 2653d5febc320946b96832f580e328b0723a7190 Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Wed, 7 Oct 2026 16:26:48 +0200
+Subject: [PATCH 32/32] vkd3d-shader: Store different constants as one vector;
+ drop moves of a register onto itself.
+
+---
+ libs/vkd3d-shader/hlsl_codegen.c | 50 +++++++++++++++++++++++++++++++-
+ libs/vkd3d-shader/ir.c           | 18 ++++++++++++
+ 2 files changed, 67 insertions(+), 1 deletion(-)
+
+diff --git a/libs/vkd3d-shader/hlsl_codegen.c b/libs/vkd3d-shader/hlsl_codegen.c
+index 1ca3e9fc..1deb8191 100644
+--- a/libs/vkd3d-shader/hlsl_codegen.c
++++ b/libs/vkd3d-shader/hlsl_codegen.c
+@@ -4066,6 +4066,18 @@ static bool is_same_vectorizable_source(struct hlsl_ir_node *a, struct hlsl_ir_n
+     return a == b;
+ }
+ 
++/* fxc2: for stores, unlike for the operands of an expression, different
++ * constants of one type will do as well: they can be written as one vector
++ * constant, see vectorize_stores(). */
++static bool is_same_vectorizable_store_source(struct hlsl_ir_node *a, struct hlsl_ir_node *b)
++{
++    if (a->type == HLSL_IR_CONSTANT && b->type == HLSL_IR_CONSTANT
++            && a->data_type->e.numeric.type == b->data_type->e.numeric.type
++            && a->data_type->e.numeric.type != HLSL_TYPE_DOUBLE)
++        return true;
++    return is_same_vectorizable_source(a, b);
++}
++
+ static bool is_same_vectorizable_expr(struct hlsl_ir_expr *a, struct hlsl_ir_expr *b)
+ {
+     if (a->op != b->op)
+@@ -4403,7 +4415,7 @@ static void record_vectorizable_store(struct hlsl_ctx *ctx, struct hlsl_block *b
+              * they're not executed in exactly the same flow, and
+              * therefore can't be vectorized. */
+             if (group->block == block
+-                    && is_same_vectorizable_source(store->rhs.node, other->rhs.node))
++                    && is_same_vectorizable_store_source(store->rhs.node, other->rhs.node))
+             {
+                 if (group->store_count < ARRAY_SIZE(group->stores))
+                 {
+@@ -4555,6 +4567,7 @@ static bool vectorize_stores(struct hlsl_ctx *ctx, struct hlsl_block *block)
+         unsigned int component_count;
+         struct hlsl_ir_store *store;
+         struct hlsl_block new_block;
++        bool all_constants;
+ 
+         if (group->store_count == 1)
+             continue;
+@@ -4597,6 +4610,41 @@ static bool vectorize_stores(struct hlsl_ctx *ctx, struct hlsl_block *block)
+         if (value->type == HLSL_IR_SWIZZLE)
+             value = hlsl_ir_swizzle(value)->val.node;
+ 
++        all_constants = true;
++        for (unsigned int j = 0; j < group->store_count; ++j)
++        {
++            if (group->stores[j]->rhs.node->type != HLSL_IR_CONSTANT)
++                all_constants = false;
++        }
++
++        if (all_constants)
++        {
++            /* fxc2: "float4(1, 1, 1, x)" stores three constants, which may
++             * well be three different nodes. Make one constant of them; later
++             * stores win where they overlap, as they would have done. */
++            struct hlsl_constant_value constant = {0}, by_component = {0};
++            unsigned int count = 0;
++
++            for (unsigned int j = 0; j < group->store_count; ++j)
++            {
++                const struct hlsl_ir_constant *c = hlsl_ir_constant(group->stores[j]->rhs.node);
++                unsigned int n = 0;
++
++                for (unsigned int k = 0; k < 4; ++k)
++                {
++                    if (group->writemasks[j] & (1u << k))
++                        by_component.u[k] = c->value.u[min(n++, c->node.data_type->e.numeric.dimx - 1)];
++                }
++            }
++            for (unsigned int k = 0; k < 4; ++k)
++            {
++                if (new_writemask & (1u << k))
++                    constant.u[count++] = by_component.u[k];
++            }
++            new_rhs = hlsl_block_add_constant(ctx, &new_block, hlsl_get_vector_type(ctx,
++                    value->data_type->e.numeric.type, count), &constant, &value->loc);
++        }
++        else
+         new_rhs = hlsl_block_add_swizzle(ctx, &new_block, new_swizzle, component_count, value, &value->loc);
+         hlsl_block_add_store_parent(ctx, &new_block, &store->lhs,
+                 group->path_len, new_rhs, new_writemask, &store->node.loc);
+diff --git a/libs/vkd3d-shader/ir.c b/libs/vkd3d-shader/ir.c
+index ee2af2ee..1c7628ed 100644
+--- a/libs/vkd3d-shader/ir.c
++++ b/libs/vkd3d-shader/ir.c
+@@ -12701,6 +12701,24 @@ static enum vkd3d_result vsir_allocate_temp_registers(struct vsir_program *progr
+             temp_allocator_set_src(&allocator, &ins->src[j]);
+         for (unsigned int j = 0; j < ins->dst_count; ++j)
+             temp_allocator_set_dst(&allocator, &ins->dst[j], ins);
++
++        /* fxc2: a value and its copy often end up in the same register,
++         * which leaves "mov r1.xyzw, r1.xyzw". */
++        if (ins->opcode == VSIR_OP_MOV && ins->dst[0].reg.type == VSIR_REGISTER_TEMP
++                && ins->src[0].reg.type == VSIR_REGISTER_TEMP
++                && ins->dst[0].reg.idx[0].offset == ins->src[0].reg.idx[0].offset
++                && !ins->dst[0].modifiers && !ins->src[0].modifiers)
++        {
++            bool identity = true;
++
++            for (unsigned int j = 0; j < 4; ++j)
++            {
++                if ((ins->dst[0].write_mask & (1u << j)) && vsir_swizzle_get_component(ins->src[0].swizzle, j) != j)
++                    identity = false;
++            }
++            if (identity)
++                vsir_instruction_make_nop(ins);
++        }
+     }
+ 
+     program->ssa_count = 0;
+-- 
+2.53.0
+

@@ -1,0 +1,120 @@
+From c62156663bd28b3c111562b75a8336f9537c157c Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Wed, 7 Oct 2026 16:18:57 +0200
+Subject: [PATCH 30/32] vkd3d-shader/hlsl: Multiply matrices by vectors with
+ vector instructions.
+
+---
+ libs/vkd3d-shader/hlsl.y | 89 ++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 89 insertions(+)
+
+diff --git a/libs/vkd3d-shader/hlsl.y b/libs/vkd3d-shader/hlsl.y
+index 7b7a272b..62835535 100644
+--- a/libs/vkd3d-shader/hlsl.y
++++ b/libs/vkd3d-shader/hlsl.y
+@@ -4574,6 +4574,90 @@ static bool intrinsic_modf(struct hlsl_ctx *ctx,
+     return !!add_user_call(ctx, func, params, loc);
+ }
+ 
++/* fxc2: matrix times vector, or vector times matrix, with vector instructions.
++ *
++ * A matrix is stored one "major" vector per register: its columns, unless it
++ * is row_major. Depending on which way round the product is, the result is
++ * either a linear combination of those vectors,
++ *     mul(M, v) = M.col0 * v.x + M.col1 * v.y + ...
++ * or one dot product with each of them,
++ *     mul(v, M) = (dot(v, M.col0), dot(v, M.col1), ...)
++ * and the other way about for a row_major matrix. Either way it takes one
++ * instruction per register (as FXC emits), where multiplying out the elements
++ * takes two per element: 28 instructions against 4 for a float4x4. */
++static bool intrinsic_mul_matrix_vector(struct hlsl_ctx *ctx, const struct parse_initializer *params,
++        const struct vkd3d_shader_location *loc)
++{
++    struct hlsl_ir_node *arg1 = params->args[0], *arg2 = params->args[1], *matrix, *vector, *result = NULL;
++    bool matrix_first = arg1->data_type->class == HLSL_CLASS_MATRIX;
++    unsigned int major, minor, k, c;
++    struct hlsl_deref matrix_deref, result_deref;
++    struct hlsl_ir_var *matrix_var, *result_var;
++    struct hlsl_type *matrix_type, *ret_type;
++    bool combination;
++
++    matrix = matrix_first ? arg1 : arg2;
++    vector = matrix_first ? arg2 : arg1;
++    matrix_type = matrix->data_type;
++    if (matrix_type->class != HLSL_CLASS_MATRIX || vector->data_type->class != HLSL_CLASS_VECTOR)
++        return false;
++    if (matrix_type->e.numeric.type != HLSL_TYPE_FLOAT || vector->data_type->e.numeric.type != HLSL_TYPE_FLOAT)
++        return false;
++    /* The vector multiplies the columns in mul(M, v) and the rows in mul(v, M). */
++    if (vector->data_type->e.numeric.dimx != (matrix_first ? matrix_type->e.numeric.dimx : matrix_type->e.numeric.dimy))
++        return false;
++
++    major = hlsl_type_major_size(matrix_type);
++    minor = hlsl_type_minor_size(matrix_type);
++    combination = matrix_first != hlsl_type_is_row_major(matrix_type);
++    ret_type = hlsl_get_vector_type(ctx, HLSL_TYPE_FLOAT, combination ? minor : major);
++
++    if (!(matrix_var = hlsl_new_synthetic_var(ctx, "mul_matrix", matrix_type, loc)))
++        return false;
++    hlsl_block_add_simple_store(ctx, params->instrs, matrix_var, matrix);
++    hlsl_deref_init_simple(&matrix_deref, matrix_var);
++
++    if (!combination)
++    {
++        if (!(result_var = hlsl_new_synthetic_var(ctx, "mul", ret_type, loc)))
++            return false;
++        hlsl_deref_init_simple(&result_deref, result_var);
++    }
++
++    for (k = 0; k < major; ++k)
++    {
++        struct hlsl_ir_node *index, *major_vector, *term;
++
++        index = hlsl_block_add_uint_constant(ctx, params->instrs, k, loc);
++        major_vector = hlsl_block_add_load_index(ctx, params->instrs, &matrix_deref, index, loc);
++
++        if (combination)
++        {
++            uint32_t swizzle = 0;
++
++            for (c = 0; c < 4; ++c)
++                hlsl_swizzle_set_component(&swizzle, c, k);
++            term = hlsl_block_add_swizzle(ctx, params->instrs, swizzle, minor, vector, loc);
++            if (!(term = add_binary_arithmetic_expr(ctx, params->instrs, HLSL_OP2_MUL, major_vector, term, loc)))
++                return false;
++            if (result && !(term = add_binary_arithmetic_expr(ctx, params->instrs, HLSL_OP2_ADD, result, term, loc)))
++                return false;
++            result = term;
++        }
++        else
++        {
++            if (!(term = add_binary_dot_expr(ctx, params->instrs, major_vector, vector, loc)))
++                return false;
++            hlsl_block_add_store_component(ctx, params->instrs, &result_deref, k, term);
++        }
++    }
++
++    if (!combination)
++        result = hlsl_block_add_simple_load(ctx, params->instrs, result_var, loc);
++    add_implicit_conversion(ctx, params->instrs, result, ret_type, loc);
++    return true;
++}
++
+ static bool intrinsic_mul(struct hlsl_ctx *ctx,
+         const struct parse_initializer *params, const struct vkd3d_shader_location *loc)
+ {
+@@ -4588,6 +4672,11 @@ static bool intrinsic_mul(struct hlsl_ctx *ctx,
+     if (arg1->data_type->class == HLSL_CLASS_SCALAR || arg2->data_type->class == HLSL_CLASS_SCALAR)
+         return !!add_binary_arithmetic_expr(ctx, params->instrs, HLSL_OP2_MUL, arg1, arg2, loc);
+ 
++    if ((arg1->data_type->class == HLSL_CLASS_VECTOR) != (arg2->data_type->class == HLSL_CLASS_VECTOR)
++            && hlsl_version_ge(ctx, 4, 0) && !getenv("VKD3D_HLSL_SCALAR_MUL")
++            && intrinsic_mul_matrix_vector(ctx, params, loc))
++        return true;
++
+     if (arg1->data_type->class == HLSL_CLASS_VECTOR)
+     {
+         vect_count++;
+-- 
+2.53.0
+

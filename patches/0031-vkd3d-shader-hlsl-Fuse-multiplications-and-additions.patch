@@ -1,0 +1,70 @@
+From 747515b6ef8713ebeb3e5128f4fc7997b293708b Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Wed, 7 Oct 2026 16:20:55 +0200
+Subject: [PATCH 31/32] vkd3d-shader/hlsl: Fuse multiplications and additions
+ into mad.
+
+---
+ libs/vkd3d-shader/hlsl_codegen.c | 39 ++++++++++++++++++++++++++++++++
+ 1 file changed, 39 insertions(+)
+
+diff --git a/libs/vkd3d-shader/hlsl_codegen.c b/libs/vkd3d-shader/hlsl_codegen.c
+index 6a2f5f22..1ca3e9fc 100644
+--- a/libs/vkd3d-shader/hlsl_codegen.c
++++ b/libs/vkd3d-shader/hlsl_codegen.c
+@@ -7860,6 +7860,42 @@ static bool lower_switch_to_ifs(struct hlsl_ctx *ctx, struct hlsl_ir_node *instr
+     return !!switch_to_ifs(ctx, instr);
+ }
+ 
++/* fxc2: a * b + c as one mad instruction, when the product is not needed for
++ * anything else. FXC does this throughout; it is not done under
++ * D3DCOMPILE_IEEE_STRICTNESS, since a driver may evaluate mad as a fused
++ * multiply-add. */
++static struct hlsl_ir_node *fuse_multiply_add(struct hlsl_ctx *ctx, struct hlsl_ir_node *instr,
++        struct hlsl_block *block)
++{
++    struct hlsl_ir_node *operands[HLSL_MAX_OPERANDS] = {0};
++    const struct hlsl_type *type = instr->data_type;
++    struct hlsl_ir_expr *expr, *mul;
++    unsigned int i;
++
++    if (instr->type != HLSL_IR_EXPR || type->class > HLSL_CLASS_VECTOR)
++        return NULL;
++    if (type->e.numeric.type != HLSL_TYPE_FLOAT && type->e.numeric.type != HLSL_TYPE_HALF)
++        return NULL;
++    expr = hlsl_ir_expr(instr);
++    if (expr->op != HLSL_OP2_ADD)
++        return NULL;
++
++    for (i = 0; i < 2; ++i)
++    {
++        struct hlsl_ir_node *product = expr->operands[i].node;
++
++        if (product->type != HLSL_IR_EXPR || hlsl_ir_expr(product)->op != HLSL_OP2_MUL
++                || list_count(&product->uses) != 1 || !hlsl_types_are_equal(product->data_type, type))
++            continue;
++        mul = hlsl_ir_expr(product);
++        operands[0] = mul->operands[0].node;
++        operands[1] = mul->operands[1].node;
++        operands[2] = expr->operands[!i].node;
++        return hlsl_block_add_expr(ctx, block, HLSL_OP3_MAD, operands, instr->data_type, &instr->loc);
++    }
++    return NULL;
++}
++
+ static bool mark_indexable_var(struct hlsl_ctx *ctx, struct hlsl_deref *deref,
+         struct hlsl_ir_node *instr)
+ {
+@@ -18191,6 +18227,9 @@ static void process_entry_function(struct hlsl_ctx *ctx, struct vsir_program *pr
+     if (hlsl_version_ge(ctx, 4, 0) && hlsl_tuning_enabled("VKD3D_HLSL_VALUE_NUMBERING", true)
+             && lvn_execute(ctx, body))
+         hlsl_run_folding_passes(ctx, body);
++    if (hlsl_version_ge(ctx, 4, 0) && !ctx->compile_info.enforce_ieee_754_fp
++            && hlsl_tuning_enabled("VKD3D_HLSL_MAD", true))
++        replace_ir(ctx, fuse_multiply_add, body);
+     run_dead_code_elimination_passes(ctx, body);
+ 
+     /* TODO: move forward, remove when no longer needed */
+-- 
+2.53.0
+
