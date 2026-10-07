@@ -375,11 +375,13 @@ int main(int argc, char **argv)
 
     hr = D3DCompile2(data, size, input, macros, &include_handler, entry, profile, flags, 0, 0, NULL, 0,
             &code, &errors);
-    if (FAILED(hr) && !getenv("VKD3D_HLSL_IMPLICIT_UNROLL_LIMIT"))
+    if (FAILED(hr) && !getenv("VKD3D_HLSL_IMPLICIT_UNROLL_LIMIT") && errors
+            && (strstr(ID3D10Blob_GetBufferPointer(errors), "E5022")
+            || strstr(ID3D10Blob_GetBufferPointer(errors), "Offset must resolve")))
     {
-        /* Some shaders are only valid once their loops are unrolled (e.g. a
-         * loop counter selecting a texture or a texel offset). Retry the way
-         * fxc would have compiled it before reporting failure. */
+        /* Some shaders are only valid once their loops are unrolled (a loop
+         * counter selecting a texture or a texel offset). Retry those the way
+         * fxc would have compiled them; other errors would only get slower. */
         ID3DBlob *code2 = NULL, *errors2 = NULL;
 
         _putenv("VKD3D_HLSL_IMPLICIT_UNROLL_LIMIT=254");

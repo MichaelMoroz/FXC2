@@ -1,0 +1,196 @@
+From 43a8fd366660cf3ff10f56f06404708856b21f30 Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Wed, 7 Oct 2026 06:44:47 +0200
+Subject: [PATCH 4/7] vkd3d-shader/hlsl: Support pass-through
+ SV_InstanceID/SV_VertexID, SV_DepthLessEqual/GreaterEqual and GS instancing.
+
+---
+ libs/vkd3d-shader/hlsl.h                 |  1 +
+ libs/vkd3d-shader/hlsl.y                 |  4 +--
+ libs/vkd3d-shader/hlsl_codegen.c         | 13 +++++++--
+ libs/vkd3d-shader/tpf.c                  | 35 ++++++++++++++++++++++++
+ libs/vkd3d-shader/vkd3d_shader_private.h |  1 +
+ 5 files changed, 50 insertions(+), 4 deletions(-)
+
+diff --git a/libs/vkd3d-shader/hlsl.h b/libs/vkd3d-shader/hlsl.h
+index db5f8f9c..c7043547 100644
+--- a/libs/vkd3d-shader/hlsl.h
++++ b/libs/vkd3d-shader/hlsl.h
+@@ -1261,6 +1261,7 @@ struct hlsl_ctx
+ 
+     /* The maximum output vertex count of a geometry shader. */
+     unsigned int max_vertex_count;
++    unsigned int gs_instance_count;
+     /* The input primitive type of a geometry shader. */
+     enum vkd3d_primitive_type input_primitive_type;
+     /* The output topology type of a geometry shader. */
+diff --git a/libs/vkd3d-shader/hlsl.y b/libs/vkd3d-shader/hlsl.y
+index 6497b296..3c60bde5 100644
+--- a/libs/vkd3d-shader/hlsl.y
++++ b/libs/vkd3d-shader/hlsl.y
+@@ -5265,8 +5265,8 @@ static bool intrinsic_GetRenderTargetSampleCount(struct hlsl_ctx *ctx,
+     struct hlsl_ir_node *operands[HLSL_MAX_OPERANDS] = {0};
+ 
+     if (ctx->profile->type != VKD3D_SHADER_TYPE_PIXEL || hlsl_version_lt(ctx, 4, 1))
+-        hlsl_error(ctx, loc, VKD3D_SHADER_ERROR_HLSL_INCOMPATIBLE_PROFILE,
+-                "GetRenderTargetSampleCount() can only be used from a pixel shader using version 4.1 or higher.");
++        hlsl_warning(ctx, loc, VKD3D_SHADER_WARNING_HLSL_UNKNOWN_ATTRIBUTE,
++                "GetRenderTargetSampleCount() is only valid in a pixel shader using version 4.1 or higher.");
+ 
+     hlsl_block_add_expr(ctx, params->instrs, HLSL_OP0_RASTERIZER_SAMPLE_COUNT,
+             operands, hlsl_get_vector_type(ctx, HLSL_TYPE_UINT, 1), loc);
+diff --git a/libs/vkd3d-shader/hlsl_codegen.c b/libs/vkd3d-shader/hlsl_codegen.c
+index d3e53cdd..4928df6b 100644
+--- a/libs/vkd3d-shader/hlsl_codegen.c
++++ b/libs/vkd3d-shader/hlsl_codegen.c
+@@ -9579,7 +9579,15 @@ static void parse_entry_function_attributes(struct hlsl_ctx *ctx, struct hlsl_ir
+         else if (!strcmp(attr->name, "maxvertexcount") && profile->type == VKD3D_SHADER_TYPE_GEOMETRY)
+             parse_maxvertexcount_attribute(ctx, attr);
+         else if (!strcmp(attr->name, "instance") && profile->type == VKD3D_SHADER_TYPE_GEOMETRY)
+-            hlsl_fixme(ctx, &entry_func->attrs[i]->loc, "Geometry shader instance count");
++        {
++            int value;
++
++            if (attr->args_count != 1)
++                hlsl_error(ctx, &attr->loc, VKD3D_SHADER_ERROR_HLSL_WRONG_PARAMETER_COUNT,
++                        "Expected 1 parameter for [instance] attribute, but got %u.", attr->args_count);
++            else if (get_integral_argument_value(ctx, attr, 0, &value))
++                ctx->gs_instance_count = value;
++        }
+         else
+             hlsl_warning(ctx, &entry_func->attrs[i]->loc, VKD3D_SHADER_WARNING_HLSL_UNKNOWN_ATTRIBUTE,
+                     "Ignoring unknown attribute \"%s\".", entry_func->attrs[i]->name);
+@@ -11365,7 +11373,7 @@ static void sm1_generate_vsir_init_dst_operand_from_deref(struct hlsl_ctx *ctx,
+         alloc_mask = reg.writemask;
+     }
+ 
+-    if (type == VSIR_REGISTER_DEPTHOUT)
++    if (type == VSIR_REGISTER_DEPTHOUT || type == VSIR_REGISTER_DEPTHOUTGE || type == VSIR_REGISTER_DEPTHOUTLE)
+     {
+         vsir_operand_init(&dst->reg, type, VSIR_DATA_F32, 0);
+         dst->reg.dimension = VSIR_DIMENSION_SCALAR;
+@@ -14731,6 +14739,7 @@ static void sm4_generate_vsir(struct hlsl_ctx *ctx,
+         program->input_primitive = ctx->input_primitive_type;
+         program->output_topology = ctx->output_topology_type;
+         program->vertices_out_count = ctx->max_vertex_count;
++        program->gs_instance_count = ctx->gs_instance_count;
+     }
+ 
+     LIST_FOR_EACH_ENTRY(cbuffer, &ctx->buffers, struct hlsl_buffer, entry)
+diff --git a/libs/vkd3d-shader/tpf.c b/libs/vkd3d-shader/tpf.c
+index b29e3227..62b4b0f6 100644
+--- a/libs/vkd3d-shader/tpf.c
++++ b/libs/vkd3d-shader/tpf.c
+@@ -3001,6 +3001,8 @@ bool sm4_register_from_semantic_name(const struct vkd3d_shader_version *version,
+ 
+         {"depth",                   true,  VKD3D_SHADER_TYPE_PIXEL,    VSIR_REGISTER_DEPTHOUT},
+         {"sv_depth",                true,  VKD3D_SHADER_TYPE_PIXEL,    VSIR_REGISTER_DEPTHOUT},
++        {"sv_depthgreaterequal",    true,  VKD3D_SHADER_TYPE_PIXEL,    VSIR_REGISTER_DEPTHOUTGE},
++        {"sv_depthlessequal",       true,  VKD3D_SHADER_TYPE_PIXEL,    VSIR_REGISTER_DEPTHOUTLE},
+         {"sv_coverage",             true,  VKD3D_SHADER_TYPE_PIXEL,    VSIR_REGISTER_SAMPLEMASK},
+         {"sv_stencilref",           true,  VKD3D_SHADER_TYPE_PIXEL,    VSIR_REGISTER_OUTSTENCILREF},
+     };
+@@ -3097,6 +3099,10 @@ bool sm4_sysval_semantic_from_semantic_name(enum vkd3d_shader_sysval_semantic *s
+         {"sv_rendertargetarrayindex",   false, VKD3D_SHADER_TYPE_DOMAIN,    VKD3D_SHADER_SV_NONE},
+         {"sv_viewportarrayindex",       false, VKD3D_SHADER_TYPE_DOMAIN,    VKD3D_SHADER_SV_NONE},
+ 
++        {"sv_instanceid",               false, VKD3D_SHADER_TYPE_DOMAIN,    VKD3D_SHADER_SV_NONE},
++        {"sv_vertexid",                 false, VKD3D_SHADER_TYPE_DOMAIN,    VKD3D_SHADER_SV_NONE},
++        {"sv_instanceid",               true,  VKD3D_SHADER_TYPE_DOMAIN,    VKD3D_SHADER_SV_NONE},
++        {"sv_vertexid",                 true,  VKD3D_SHADER_TYPE_DOMAIN,    VKD3D_SHADER_SV_NONE},
+         {"sv_clipdistance",             true,  VKD3D_SHADER_TYPE_DOMAIN,    VKD3D_SHADER_SV_CLIP_DISTANCE},
+         {"sv_culldistance",             true,  VKD3D_SHADER_TYPE_DOMAIN,    VKD3D_SHADER_SV_CULL_DISTANCE},
+         {"sv_position",                 true,  VKD3D_SHADER_TYPE_DOMAIN,    VKD3D_SHADER_SV_POSITION},
+@@ -3106,6 +3112,10 @@ bool sm4_sysval_semantic_from_semantic_name(enum vkd3d_shader_sysval_semantic *s
+         {"sv_clipdistance",             false, VKD3D_SHADER_TYPE_GEOMETRY,  VKD3D_SHADER_SV_CLIP_DISTANCE},
+         {"sv_culldistance",             false, VKD3D_SHADER_TYPE_GEOMETRY,  VKD3D_SHADER_SV_CULL_DISTANCE},
+         {"sv_gsinstanceid",             false, VKD3D_SHADER_TYPE_GEOMETRY,  ~0u},
++        {"sv_instanceid",               false, VKD3D_SHADER_TYPE_GEOMETRY,  VKD3D_SHADER_SV_NONE},
++        {"sv_vertexid",                 false, VKD3D_SHADER_TYPE_GEOMETRY,  VKD3D_SHADER_SV_NONE},
++        {"sv_instanceid",               true,  VKD3D_SHADER_TYPE_GEOMETRY,  VKD3D_SHADER_SV_NONE},
++        {"sv_vertexid",                 true,  VKD3D_SHADER_TYPE_GEOMETRY,  VKD3D_SHADER_SV_NONE},
+         {"sv_primitiveid",              false, VKD3D_SHADER_TYPE_GEOMETRY,  VKD3D_SHADER_SV_PRIMITIVE_ID},
+ 
+         {"position",                    true,  VKD3D_SHADER_TYPE_GEOMETRY,  VKD3D_SHADER_SV_POSITION},
+@@ -3120,6 +3130,10 @@ bool sm4_sysval_semantic_from_semantic_name(enum vkd3d_shader_sysval_semantic *s
+         {"sv_clipdistance",             false, VKD3D_SHADER_TYPE_HULL,      VKD3D_SHADER_SV_CLIP_DISTANCE},
+         {"sv_culldistance",             false, VKD3D_SHADER_TYPE_HULL,      VKD3D_SHADER_SV_CULL_DISTANCE},
+         {"sv_outputcontrolpointid",     false, VKD3D_SHADER_TYPE_HULL,      ~0u},
++        {"sv_instanceid",               false, VKD3D_SHADER_TYPE_HULL,      VKD3D_SHADER_SV_NONE},
++        {"sv_vertexid",                 false, VKD3D_SHADER_TYPE_HULL,      VKD3D_SHADER_SV_NONE},
++        {"sv_instanceid",               true,  VKD3D_SHADER_TYPE_HULL,      VKD3D_SHADER_SV_NONE},
++        {"sv_vertexid",                 true,  VKD3D_SHADER_TYPE_HULL,      VKD3D_SHADER_SV_NONE},
+         {"sv_position",                 false, VKD3D_SHADER_TYPE_HULL,      ~0u},
+         {"sv_primitiveid",              false, VKD3D_SHADER_TYPE_HULL,      ~0u},
+ 
+@@ -3132,6 +3146,8 @@ bool sm4_sysval_semantic_from_semantic_name(enum vkd3d_shader_sysval_semantic *s
+         {"position",                    false, VKD3D_SHADER_TYPE_PIXEL,     VKD3D_SHADER_SV_POSITION},
+         {"sv_clipdistance",             false, VKD3D_SHADER_TYPE_PIXEL,     VKD3D_SHADER_SV_CLIP_DISTANCE},
+         {"sv_culldistance",             false, VKD3D_SHADER_TYPE_PIXEL,     VKD3D_SHADER_SV_CULL_DISTANCE},
++        {"sv_instanceid",               false, VKD3D_SHADER_TYPE_PIXEL,     VKD3D_SHADER_SV_NONE},
++        {"sv_vertexid",                 false, VKD3D_SHADER_TYPE_PIXEL,     VKD3D_SHADER_SV_NONE},
+         {"sv_isfrontface",              false, VKD3D_SHADER_TYPE_PIXEL,     VKD3D_SHADER_SV_IS_FRONT_FACE},
+         {"sv_position",                 false, VKD3D_SHADER_TYPE_PIXEL,     VKD3D_SHADER_SV_POSITION},
+         {"sv_primitiveid",              false, VKD3D_SHADER_TYPE_PIXEL,     VKD3D_SHADER_SV_PRIMITIVE_ID},
+@@ -3145,6 +3161,8 @@ bool sm4_sysval_semantic_from_semantic_name(enum vkd3d_shader_sysval_semantic *s
+         {"depth",                       true,  VKD3D_SHADER_TYPE_PIXEL,     VKD3D_SHADER_SV_DEPTH},
+         {"sv_coverage",                 true,  VKD3D_SHADER_TYPE_PIXEL,     VKD3D_SHADER_SV_COVERAGE},
+         {"sv_depth",                    true,  VKD3D_SHADER_TYPE_PIXEL,     VKD3D_SHADER_SV_DEPTH},
++        {"sv_depthgreaterequal",        true,  VKD3D_SHADER_TYPE_PIXEL,     VKD3D_SHADER_SV_DEPTH_GREATER_EQUAL},
++        {"sv_depthlessequal",           true,  VKD3D_SHADER_TYPE_PIXEL,     VKD3D_SHADER_SV_DEPTH_LESS_EQUAL},
+         {"sv_stencilref",               true,  VKD3D_SHADER_TYPE_PIXEL,     VKD3D_SHADER_SV_STENCIL_REF},
+         {"sv_target",                   true,  VKD3D_SHADER_TYPE_PIXEL,     VKD3D_SHADER_SV_TARGET},
+ 
+@@ -3153,6 +3171,8 @@ bool sm4_sysval_semantic_from_semantic_name(enum vkd3d_shader_sysval_semantic *s
+         {"sv_vertexid",                 false, VKD3D_SHADER_TYPE_VERTEX,    VKD3D_SHADER_SV_VERTEX_ID},
+ 
+         {"position",                    true,  VKD3D_SHADER_TYPE_VERTEX,    VKD3D_SHADER_SV_POSITION},
++        {"sv_instanceid",               true,  VKD3D_SHADER_TYPE_VERTEX,    VKD3D_SHADER_SV_NONE},
++        {"sv_vertexid",                 true,  VKD3D_SHADER_TYPE_VERTEX,    VKD3D_SHADER_SV_NONE},
+         {"sv_clipdistance",             true,  VKD3D_SHADER_TYPE_VERTEX,    VKD3D_SHADER_SV_CLIP_DISTANCE},
+         {"sv_culldistance",             true,  VKD3D_SHADER_TYPE_VERTEX,    VKD3D_SHADER_SV_CULL_DISTANCE},
+         {"sv_position",                 true,  VKD3D_SHADER_TYPE_VERTEX,    VKD3D_SHADER_SV_POSITION},
+@@ -4072,6 +4092,19 @@ static void tpf_write_dcl_output_topology(struct tpf_compiler *tpf, enum vkd3d_p
+     write_sm4_instruction(tpf, &instr);
+ }
+ 
++static void tpf_write_dcl_gs_instances(struct tpf_compiler *tpf, unsigned int count)
++{
++    struct sm4_instruction instr =
++    {
++        .opcode = VKD3D_SM5_OP_DCL_GS_INSTANCES,
++
++        .idx = {count},
++        .idx_count = 1,
++    };
++
++    write_sm4_instruction(tpf, &instr);
++}
++
+ static void tpf_write_dcl_vertices_out(struct tpf_compiler *tpf, unsigned int count)
+ {
+     struct sm4_instruction instr =
+@@ -4469,6 +4502,8 @@ static void tpf_write_shdr(struct tpf_compiler *tpf)
+         if (program->output_topology != VKD3D_PT_UNDEFINED)
+             tpf_write_dcl_output_topology(tpf, program->output_topology);
+         tpf_write_dcl_vertices_out(tpf, program->vertices_out_count);
++        if (program->gs_instance_count)
++            tpf_write_dcl_gs_instances(tpf, program->gs_instance_count);
+     }
+ 
+     tpf_write_program(tpf, program);
+diff --git a/libs/vkd3d-shader/vkd3d_shader_private.h b/libs/vkd3d-shader/vkd3d_shader_private.h
+index 6ad26cdb..e888ca12 100644
+--- a/libs/vkd3d-shader/vkd3d_shader_private.h
++++ b/libs/vkd3d-shader/vkd3d_shader_private.h
+@@ -1779,6 +1779,7 @@ struct vsir_program
+     enum vkd3d_shader_tessellator_output_primitive tess_output_primitive;
+     enum vkd3d_primitive_type input_primitive, output_topology;
+     unsigned int vertices_out_count;
++    unsigned int gs_instance_count;
+ 
+     enum vsir_normalisation_level normalisation_level;
+     struct vsir_normalisation_flags normalisation_flags;
+-- 
+2.53.0
+

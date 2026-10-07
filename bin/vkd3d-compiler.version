@@ -2,3 +2,7 @@ vkd3d-2.1-93-gcfcb4833
 0001-vkd3d-shader-hlsl-Do-not-implicitly-unroll-SM4-loops.patch
 0002-vkd3d-shader-hlsl-Add-isnan-isfinite-and-reversebits.patch
 0003-vkd3d-shader-hlsl-Add-Load-and-GetDimensions-for-UAV.patch
+0004-vkd3d-shader-hlsl-Support-pass-through-SV_InstanceID.patch
+0005-vkd3d-shader-hlsl-Negate-bools-as-ints.patch
+0006-vkd3d-shader-hlsl-Emulate-firstbithigh-and-firstbitl.patch
+0007-vkd3d-shader-hlsl-Bound-the-recursion-of-evaluate_co.patch

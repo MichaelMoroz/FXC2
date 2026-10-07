@@ -1,0 +1,36 @@
+From bd8fa5abcf7ff4fd507d69b286e9a7d9707c6f01 Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Wed, 7 Oct 2026 06:44:48 +0200
+Subject: [PATCH 5/7] vkd3d-shader/hlsl: Negate bools as ints.
+
+---
+ libs/vkd3d-shader/hlsl.y | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/libs/vkd3d-shader/hlsl.y b/libs/vkd3d-shader/hlsl.y
+index 3c60bde5..1887b9c7 100644
+--- a/libs/vkd3d-shader/hlsl.y
++++ b/libs/vkd3d-shader/hlsl.y
+@@ -1705,6 +1705,19 @@ static struct hlsl_ir_node *add_unary_arithmetic_expr(struct hlsl_ctx *ctx, stru
+     if (arg->data_type->class == HLSL_CLASS_ERROR)
+         return arg;
+ 
++    /* fxc2: negating a bool yields an int, as in "x - (a > b)". Subtraction
++     * is built as an addition of the negated operand, so without this the
++     * negation would be done on the bool itself, which has no meaning. */
++    if (op == HLSL_OP1_NEG && hlsl_is_numeric_type(arg->data_type)
++            && arg->data_type->e.numeric.type == HLSL_TYPE_BOOL)
++    {
++        struct hlsl_type *int_type = hlsl_change_base_type(ctx, arg->data_type, HLSL_TYPE_INT);
++
++        if (!(arg = add_implicit_conversion(ctx, block, arg, int_type, loc)))
++            return NULL;
++        args[0] = arg;
++    }
++
+     return add_expr(ctx, block, op, args, arg->data_type, loc);
+ }
+ 
+-- 
+2.53.0
+

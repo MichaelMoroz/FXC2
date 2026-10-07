@@ -1,0 +1,83 @@
+From 6b5f9099baca3a044faa7936978fc57ff28a184b Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Wed, 7 Oct 2026 06:44:48 +0200
+Subject: [PATCH 6/7] vkd3d-shader/hlsl: Emulate firstbithigh() and
+ firstbitlow() for shader model 4.
+
+---
+ libs/vkd3d-shader/hlsl.y | 45 +++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 44 insertions(+), 1 deletion(-)
+
+diff --git a/libs/vkd3d-shader/hlsl.y b/libs/vkd3d-shader/hlsl.y
+index 1887b9c7..8bd3d583 100644
+--- a/libs/vkd3d-shader/hlsl.y
++++ b/libs/vkd3d-shader/hlsl.y
+@@ -4047,6 +4047,40 @@ static bool intrinsic_f32tof16(struct hlsl_ctx *ctx,
+     return add_expr(ctx, params->instrs, HLSL_OP1_F32TOF16, operands, type, loc);
+ }
+ 
++/* fxc2: shader model 4 has no bit scan instructions; FXC emulates
++ * firstbithigh() and firstbitlow() there, and so does this. "prepare" turns
++ * the argument into a value whose highest set bit is the answer. */
++static bool intrinsic_sm4_bit_scan(struct hlsl_ctx *ctx, const struct parse_initializer *params,
++        const struct vkd3d_shader_location *loc, const char *name, const char *prepare)
++{
++    struct hlsl_type *arg_type = params->args[0]->data_type, *type;
++    struct hlsl_ir_function_decl *func;
++    char *body;
++
++    static const char template[] =
++            "%s %s(%s x)\n"
++            "{\n"
++            "    %s v = %s, o = v, r = 0, s;\n"
++            "    s = (%s)(v > 0xffffu) * 16u; v >>= s; r += s;\n"
++            "    s = (%s)(v > 0xffu) * 8u; v >>= s; r += s;\n"
++            "    s = (%s)(v > 0xfu) * 4u; v >>= s; r += s;\n"
++            "    s = (%s)(v > 0x3u) * 2u; v >>= s; r += s;\n"
++            "    r += v >> 1;\n"
++            "    return r - (%s)(o == 0u);\n"
++            "}";
++
++    type = hlsl_change_base_type(ctx, arg_type, HLSL_TYPE_UINT);
++    if (!(body = hlsl_sprintf_alloc(ctx, template, type->name, name, arg_type->name, type->name, prepare,
++            type->name, type->name, type->name, type->name, type->name)))
++        return false;
++    func = hlsl_compile_internal_function(ctx, name, body);
++    vkd3d_free(body);
++    if (!func)
++        return false;
++
++    return !!add_user_call(ctx, func, params, loc);
++}
++
+ static bool intrinsic_firstbithigh(struct hlsl_ctx *ctx,
+         const struct parse_initializer *params, const struct vkd3d_shader_location *loc)
+ {
+@@ -4072,7 +4106,12 @@ static bool intrinsic_firstbithigh(struct hlsl_ctx *ctx,
+ 
+     operands[0] = params->args[0];
+     if (hlsl_version_lt(ctx, 5, 0))
+-        return add_expr(ctx, params->instrs, HLSL_OP1_FIND_MSB, operands, type, loc);
++    {
++        /* For negative values the first zero bit is the one looked for. */
++        if (hlsl_type_is_unsigned_integer(params->args[0]->data_type))
++            return intrinsic_sm4_bit_scan(ctx, params, loc, "firstbithigh", "x");
++        return intrinsic_sm4_bit_scan(ctx, params, loc, "firstbithigh", "x ^ (x >> 31)");
++    }
+ 
+     c = hlsl_block_add_uint_constant(ctx, params->instrs, 0x1f, loc);
+ 
+@@ -4106,6 +4145,10 @@ static bool intrinsic_firstbitlow(struct hlsl_ctx *ctx,
+         return false;
+     type = hlsl_change_base_type(ctx, params->args[0]->data_type, HLSL_TYPE_UINT);
+ 
++    /* x & -x isolates the lowest set bit. */
++    if (hlsl_version_lt(ctx, 5, 0))
++        return intrinsic_sm4_bit_scan(ctx, params, loc, "firstbitlow", "x & (0u - x)");
++
+     operands[0] = params->args[0];
+     return add_expr(ctx, params->instrs, HLSL_OP1_CTZ, operands, type, loc);
+ }
+-- 
+2.53.0
+

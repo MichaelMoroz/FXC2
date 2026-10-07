@@ -1,0 +1,73 @@
+From 63078394991920b64e9b633e3e9d66dbd9968c3a Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Wed, 7 Oct 2026 06:44:48 +0200
+Subject: [PATCH 7/7] vkd3d-shader/hlsl: Bound the recursion of
+ evaluate_conditionals_recurse().
+
+---
+ libs/vkd3d-shader/hlsl_codegen.c | 19 +++++++++++++------
+ 1 file changed, 13 insertions(+), 6 deletions(-)
+
+diff --git a/libs/vkd3d-shader/hlsl_codegen.c b/libs/vkd3d-shader/hlsl_codegen.c
+index 4928df6b..4cf6c2dc 100644
+--- a/libs/vkd3d-shader/hlsl_codegen.c
++++ b/libs/vkd3d-shader/hlsl_codegen.c
+@@ -10099,9 +10099,15 @@ static bool nodes_are_equivalent(const struct hlsl_ir_node *c1, const struct hls
+ 
+ /* Replaces all conditionals in an expression chain of the form (cond ? x : y)
+  * with x or y, assuming cond = cond_value. */
++/* fxc2: this walks the operands as a tree, but they form a graph with shared
++ * subexpressions, so the cost is exponential in its depth. Unrolled loops
++ * produce long chains of selects where that meant minutes per shader. It is
++ * only an optimisation, so stop looking beyond a few levels. */
++#define EVALUATE_CONDITIONALS_MAX_DEPTH 6
++
+ static struct hlsl_ir_node *evaluate_conditionals_recurse(struct hlsl_ctx *ctx,
+         struct hlsl_block *block, const struct hlsl_ir_node *cond, bool cond_value,
+-        struct hlsl_ir_node *instr, const struct vkd3d_shader_location *loc)
++        struct hlsl_ir_node *instr, const struct vkd3d_shader_location *loc, unsigned int depth)
+ {
+     struct hlsl_ir_node *operands[HLSL_MAX_OPERANDS] = {0};
+     struct hlsl_ir_expr *expr;
+@@ -10109,7 +10115,7 @@ static struct hlsl_ir_node *evaluate_conditionals_recurse(struct hlsl_ctx *ctx,
+     bool progress = false;
+     unsigned int i;
+ 
+-    if (instr->type != HLSL_IR_EXPR)
++    if (instr->type != HLSL_IR_EXPR || depth > EVALUATE_CONDITIONALS_MAX_DEPTH)
+         return NULL;
+     expr = hlsl_ir_expr(instr);
+ 
+@@ -10117,7 +10123,7 @@ static struct hlsl_ir_node *evaluate_conditionals_recurse(struct hlsl_ctx *ctx,
+     {
+         struct hlsl_ir_node *x = cond_value ? expr->operands[1].node : expr->operands[2].node;
+ 
+-        res = evaluate_conditionals_recurse(ctx, block, cond, cond_value, x, loc);
++        res = evaluate_conditionals_recurse(ctx, block, cond, cond_value, x, loc, depth + 1);
+         return res ? res : x;
+     }
+ 
+@@ -10126,7 +10132,8 @@ static struct hlsl_ir_node *evaluate_conditionals_recurse(struct hlsl_ctx *ctx,
+         if (!expr->operands[i].node)
+             break;
+ 
+-        operands[i] = evaluate_conditionals_recurse(ctx, block, cond, cond_value, expr->operands[i].node, loc);
++        operands[i] = evaluate_conditionals_recurse(ctx, block, cond, cond_value,
++                expr->operands[i].node, loc, depth + 1);
+ 
+         if (operands[i])
+             progress = true;
+@@ -10195,8 +10202,8 @@ static struct hlsl_ir_node *fold_conditional_identities(struct hlsl_ctx *ctx,
+     if (ec && ec->op == HLSL_OP1_LOGIC_NOT)
+         return hlsl_add_conditional(ctx, block, ec->operands[0].node, y, x);
+ 
+-    res_x = evaluate_conditionals_recurse(ctx, block, c, true, x, &instr->loc);
+-    res_y = evaluate_conditionals_recurse(ctx, block, c, false, y, &instr->loc);
++    res_x = evaluate_conditionals_recurse(ctx, block, c, true, x, &instr->loc, 0);
++    res_y = evaluate_conditionals_recurse(ctx, block, c, false, y, &instr->loc, 0);
+     if (res_x || res_y)
+         return hlsl_add_conditional(ctx, block, c, res_x ? res_x : x, res_y ? res_y : y);
+ 
+-- 
+2.53.0
+
