@@ -1,0 +1,348 @@
+import os
+base = os.path.expanduser("~/fxc2/vkd3d/libs/vkd3d-shader/")
+
+
+def edit(name, pairs):
+    path = base + name
+    s = open(path).read()
+    for old, new, *count in pairs:
+        n = count[0] if count else 1
+        assert s.count(old) == n, (name, old, s.count(old))
+        s = s.replace(old, new)
+    open(path, "w").write(s)
+
+
+edit("hlsl.h", [
+    ('''    /* fxc2: scalar replacement of struct variables, see sroa_execute(). */
+''', '''    /* fxc2: bumped by every store to the variable while value numbering,
+     * see lvn_execute(). */
+    unsigned int lvn_generation;
+    /* fxc2: scalar replacement of struct variables, see sroa_execute(). */
+'''),
+])
+
+LVN = r'''/* fxc2: value numbering.
+ *
+ * The code generator emits one instruction per IR node, and every use of a
+ * variable in the source is a load node of its own, so "x >> 12" written (or
+ * inlined) four times in a row becomes four loads and four shifts. Drivers
+ * recompile the bytecode, but on large shaders this redundancy still costs
+ * run time. Reuse an earlier node when a later one must have the same value:
+ *
+ *  - constants, expressions and swizzles with identical operands;
+ *  - loads of a variable (same path) that has not been stored to in between.
+ *
+ * "Earlier" means dominating, which in this structured IR is simply: earlier
+ * in the same block or in an enclosing one. Entries are therefore scoped to
+ * the block that created them. Stores are tracked with a per-variable
+ * generation; a loop invalidates up front every variable stored to anywhere
+ * inside it, because of the back edge. */
+struct lvn_entry
+{
+    struct hlsl_ir_node *node;
+    uint32_t hash;
+    unsigned int generation;
+    int next;
+};
+
+struct lvn_state
+{
+    struct lvn_entry *entries;
+    size_t count, capacity;
+    int *buckets;
+    bool progress;
+};
+
+#define LVN_BUCKET_COUNT 16384
+
+static uint32_t lvn_hash_combine(uint32_t hash, uintptr_t value)
+{
+    hash ^= (uint32_t)value ^ (uint32_t)((uint64_t)value >> 32);
+    return hash * 0x01000193u + 0x9e3779b9u;
+}
+
+static bool lvn_types_equal(const struct hlsl_type *a, const struct hlsl_type *b)
+{
+    return a == b || hlsl_types_are_equal(a, b);
+}
+
+/* All the bits of a constant's component: a double has 64 of them. */
+static uint64_t lvn_constant_bits(const struct hlsl_ir_node *instr, unsigned int component)
+{
+    const union hlsl_constant_value_component *value = &hlsl_ir_constant(instr)->value.u[component];
+    uint64_t bits;
+
+    if (instr->data_type->e.numeric.type != HLSL_TYPE_DOUBLE)
+        return value->u;
+    memcpy(&bits, &value->d, sizeof(bits));
+    return bits;
+}
+
+/* Whether the node is of a kind this pass handles, and its hash if so. */
+static bool lvn_hash_node(const struct hlsl_ir_node *instr, uint32_t *hash)
+{
+    uint32_t h = instr->type * 0x9e3779b9u;
+    unsigned int i;
+
+    if (!instr->data_type || instr->data_type->class > HLSL_CLASS_VECTOR)
+        return false;
+    h = lvn_hash_combine(h, instr->data_type->e.numeric.type * 16 + instr->data_type->e.numeric.dimx);
+
+    switch (instr->type)
+    {
+        case HLSL_IR_CONSTANT:
+            for (i = 0; i < instr->data_type->e.numeric.dimx; ++i)
+                h = lvn_hash_combine(h, lvn_constant_bits(instr, i));
+            break;
+
+        case HLSL_IR_EXPR:
+        {
+            const struct hlsl_ir_expr *expr = hlsl_ir_expr(instr);
+
+            /* Derivatives depend on where they are evaluated. */
+            if (expr->op == HLSL_OP1_DSX || expr->op == HLSL_OP1_DSX_COARSE || expr->op == HLSL_OP1_DSX_FINE
+                    || expr->op == HLSL_OP1_DSY || expr->op == HLSL_OP1_DSY_COARSE
+                    || expr->op == HLSL_OP1_DSY_FINE)
+                return false;
+            h = lvn_hash_combine(h, expr->op);
+            for (i = 0; i < HLSL_MAX_OPERANDS; ++i)
+                h = lvn_hash_combine(h, (uintptr_t)expr->operands[i].node);
+            break;
+        }
+
+        case HLSL_IR_SWIZZLE:
+        {
+            const struct hlsl_ir_swizzle *swizzle = hlsl_ir_swizzle(instr);
+
+            if (swizzle->val.node->data_type->class > HLSL_CLASS_VECTOR)
+                return false;
+            h = lvn_hash_combine(h, (uintptr_t)swizzle->val.node);
+            h = lvn_hash_combine(h, swizzle->u.vector);
+            break;
+        }
+
+        case HLSL_IR_LOAD:
+        {
+            const struct hlsl_deref *deref = &hlsl_ir_load(instr)->src;
+
+            if (deref->var->is_tgsm)
+                return false;
+            h = lvn_hash_combine(h, (uintptr_t)deref->var);
+            for (i = 0; i < deref->path_len; ++i)
+                h = lvn_hash_combine(h, (uintptr_t)deref->path[i].node);
+            break;
+        }
+
+        default:
+            return false;
+    }
+
+    *hash = h;
+    return true;
+}
+
+static bool lvn_nodes_equal(const struct hlsl_ir_node *a, const struct hlsl_ir_node *b)
+{
+    unsigned int i;
+
+    if (a->type != b->type || !lvn_types_equal(a->data_type, b->data_type))
+        return false;
+
+    switch (a->type)
+    {
+        case HLSL_IR_CONSTANT:
+            for (i = 0; i < a->data_type->e.numeric.dimx; ++i)
+            {
+                if (lvn_constant_bits(a, i) != lvn_constant_bits(b, i))
+                    return false;
+            }
+            return true;
+
+        case HLSL_IR_EXPR:
+            if (hlsl_ir_expr(a)->op != hlsl_ir_expr(b)->op)
+                return false;
+            for (i = 0; i < HLSL_MAX_OPERANDS; ++i)
+            {
+                if (hlsl_ir_expr(a)->operands[i].node != hlsl_ir_expr(b)->operands[i].node)
+                    return false;
+            }
+            return true;
+
+        case HLSL_IR_SWIZZLE:
+            return hlsl_ir_swizzle(a)->val.node == hlsl_ir_swizzle(b)->val.node
+                    && hlsl_ir_swizzle(a)->u.vector == hlsl_ir_swizzle(b)->u.vector;
+
+        case HLSL_IR_LOAD:
+        {
+            const struct hlsl_deref *da = &hlsl_ir_load(a)->src, *db = &hlsl_ir_load(b)->src;
+
+            if (da->var != db->var || da->path_len != db->path_len)
+                return false;
+            for (i = 0; i < da->path_len; ++i)
+            {
+                if (da->path[i].node != db->path[i].node)
+                    return false;
+            }
+            return true;
+        }
+
+        default:
+            return false;
+    }
+}
+
+static void lvn_invalidate_stores(struct hlsl_block *block)
+{
+    struct hlsl_ir_node *instr;
+
+    LIST_FOR_EACH_ENTRY(instr, &block->instrs, struct hlsl_ir_node, entry)
+    {
+        if (instr->type == HLSL_IR_STORE)
+        {
+            ++hlsl_ir_store(instr)->lhs.var->lvn_generation;
+        }
+        else if (instr->type == HLSL_IR_IF)
+        {
+            lvn_invalidate_stores(&hlsl_ir_if(instr)->then_block);
+            lvn_invalidate_stores(&hlsl_ir_if(instr)->else_block);
+        }
+        else if (instr->type == HLSL_IR_LOOP)
+        {
+            lvn_invalidate_stores(&hlsl_ir_loop(instr)->body);
+            lvn_invalidate_stores(&hlsl_ir_loop(instr)->iter);
+        }
+        else if (instr->type == HLSL_IR_SWITCH)
+        {
+            struct hlsl_ir_switch_case *c;
+
+            LIST_FOR_EACH_ENTRY(c, &hlsl_ir_switch(instr)->cases, struct hlsl_ir_switch_case, entry)
+                lvn_invalidate_stores(&c->body);
+        }
+    }
+}
+
+static void lvn_process_block(struct hlsl_ctx *ctx, struct lvn_state *state, struct hlsl_block *block)
+{
+    struct hlsl_ir_node *instr, *next;
+    size_t scope_start = state->count;
+
+    LIST_FOR_EACH_ENTRY_SAFE(instr, next, &block->instrs, struct hlsl_ir_node, entry)
+    {
+        struct hlsl_ir_node *found = NULL;
+        unsigned int generation = 0;
+        struct lvn_entry *entry;
+        uint32_t hash;
+        int i;
+
+        switch (instr->type)
+        {
+            case HLSL_IR_STORE:
+                ++hlsl_ir_store(instr)->lhs.var->lvn_generation;
+                continue;
+
+            case HLSL_IR_IF:
+                lvn_process_block(ctx, state, &hlsl_ir_if(instr)->then_block);
+                lvn_process_block(ctx, state, &hlsl_ir_if(instr)->else_block);
+                continue;
+
+            case HLSL_IR_LOOP:
+                lvn_invalidate_stores(&hlsl_ir_loop(instr)->body);
+                lvn_invalidate_stores(&hlsl_ir_loop(instr)->iter);
+                lvn_process_block(ctx, state, &hlsl_ir_loop(instr)->body);
+                lvn_process_block(ctx, state, &hlsl_ir_loop(instr)->iter);
+                continue;
+
+            case HLSL_IR_SWITCH:
+            {
+                struct hlsl_ir_switch_case *c;
+
+                LIST_FOR_EACH_ENTRY(c, &hlsl_ir_switch(instr)->cases, struct hlsl_ir_switch_case, entry)
+                    lvn_process_block(ctx, state, &c->body);
+                continue;
+            }
+
+            default:
+                break;
+        }
+
+        if (!lvn_hash_node(instr, &hash))
+            continue;
+        if (instr->type == HLSL_IR_LOAD)
+            generation = hlsl_ir_load(instr)->src.var->lvn_generation;
+
+        for (i = state->buckets[hash % LVN_BUCKET_COUNT]; i >= 0; i = state->entries[i].next)
+        {
+            entry = &state->entries[i];
+            if (entry->hash == hash && entry->generation == generation && lvn_nodes_equal(entry->node, instr))
+            {
+                found = entry->node;
+                break;
+            }
+        }
+
+        if (found)
+        {
+            hlsl_replace_node(instr, found);
+            state->progress = true;
+            continue;
+        }
+
+        if (!hlsl_array_reserve(ctx, (void **)&state->entries, &state->capacity,
+                state->count + 1, sizeof(*state->entries)))
+            return;
+        entry = &state->entries[state->count];
+        entry->node = instr;
+        entry->hash = hash;
+        entry->generation = generation;
+        entry->next = state->buckets[hash % LVN_BUCKET_COUNT];
+        state->buckets[hash % LVN_BUCKET_COUNT] = state->count++;
+    }
+
+    /* Leave the scope: entries were pushed on their bucket chains in order,
+     * so they come off the same way. */
+    while (state->count > scope_start)
+    {
+        struct lvn_entry *entry = &state->entries[--state->count];
+
+        state->buckets[entry->hash % LVN_BUCKET_COUNT] = entry->next;
+    }
+}
+
+static bool lvn_execute(struct hlsl_ctx *ctx, struct hlsl_block *body)
+{
+    struct lvn_state state = {0};
+    unsigned int i;
+
+    if (!(state.buckets = hlsl_calloc(ctx, LVN_BUCKET_COUNT, sizeof(*state.buckets))))
+        return false;
+    for (i = 0; i < LVN_BUCKET_COUNT; ++i)
+        state.buckets[i] = -1;
+
+    lvn_process_block(ctx, &state, body);
+
+    vkd3d_free(state.buckets);
+    vkd3d_free(state.entries);
+    return state.progress;
+}
+
+'''
+
+edit("hlsl_codegen.c", [
+    ('''static bool mark_indexable_var(struct hlsl_ctx *ctx, struct hlsl_deref *deref,
+        struct hlsl_ir_node *instr)
+{''', LVN + '''static bool mark_indexable_var(struct hlsl_ctx *ctx, struct hlsl_deref *deref,
+        struct hlsl_ir_node *instr)
+{'''),
+    ('''    replace_ir(ctx, validate_nonconstant_vector_store_derefs, body);
+
+    hlsl_run_folding_passes(ctx, body);
+    run_dead_code_elimination_passes(ctx, body);
+''', '''    replace_ir(ctx, validate_nonconstant_vector_store_derefs, body);
+
+    hlsl_run_folding_passes(ctx, body);
+    if (hlsl_version_ge(ctx, 4, 0) && lvn_execute(ctx, body))
+        hlsl_run_folding_passes(ctx, body);
+    run_dead_code_elimination_passes(ctx, body);
+'''),
+])
+print("patched")

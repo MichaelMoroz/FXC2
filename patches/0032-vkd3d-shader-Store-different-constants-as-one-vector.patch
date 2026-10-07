@@ -1,7 +1,7 @@
 From 2653d5febc320946b96832f580e328b0723a7190 Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 16:26:48 +0200
-Subject: [PATCH 32/41] vkd3d-shader: Store different constants as one vector;
+Subject: [PATCH 32/42] vkd3d-shader: Store different constants as one vector;
  drop moves of a register onto itself.
 
 ---

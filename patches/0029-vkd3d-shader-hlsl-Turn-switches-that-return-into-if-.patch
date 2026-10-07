@@ -1,7 +1,7 @@
 From 5a11e2c59f226f71d89a97c81b85bfd5e8e74ea1 Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 09:22:21 +0200
-Subject: [PATCH 29/41] vkd3d-shader/hlsl: Turn switches that return into if
+Subject: [PATCH 29/42] vkd3d-shader/hlsl: Turn switches that return into if
  chains before lowering returns.
 
 ---

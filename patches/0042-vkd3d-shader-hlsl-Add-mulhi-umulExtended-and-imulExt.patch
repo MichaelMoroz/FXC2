@@ -1,0 +1,266 @@
+From 5a850bc848c79a637215e2973dc394ae4ae0ca47 Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Wed, 7 Oct 2026 20:35:18 +0200
+Subject: [PATCH 42/42] vkd3d-shader/hlsl: Add mulhi(), umulExtended() and
+ imulExtended().
+
+---
+ libs/vkd3d-shader/hlsl.c         |  1 +
+ libs/vkd3d-shader/hlsl.h         |  3 ++
+ libs/vkd3d-shader/hlsl.y         | 84 ++++++++++++++++++++++++++++++++
+ libs/vkd3d-shader/hlsl_codegen.c |  6 +++
+ libs/vkd3d-shader/ir.c           | 59 ++++++++++++++++++++++
+ libs/vkd3d-shader/tpf.c          |  1 +
+ 6 files changed, 154 insertions(+)
+
+diff --git a/libs/vkd3d-shader/hlsl.c b/libs/vkd3d-shader/hlsl.c
+index 21b2bfa4..ee81857a 100644
+--- a/libs/vkd3d-shader/hlsl.c
++++ b/libs/vkd3d-shader/hlsl.c
+@@ -3896,6 +3896,7 @@ const char *debug_hlsl_expr_op(enum hlsl_ir_expr_op op)
+         [HLSL_OP2_MIN]         = "min",
+         [HLSL_OP2_MOD]         = "%",
+         [HLSL_OP2_MUL]         = "*",
++        [HLSL_OP2_MUL_HI]      = "mulhi",
+         [HLSL_OP2_NEQUAL]      = "!=",
+         [HLSL_OP2_RSHIFT]      = ">>",
+         [HLSL_OP2_SLT]         = "slt",
+diff --git a/libs/vkd3d-shader/hlsl.h b/libs/vkd3d-shader/hlsl.h
+index 1377135d..397e25bb 100644
+--- a/libs/vkd3d-shader/hlsl.h
++++ b/libs/vkd3d-shader/hlsl.h
+@@ -833,6 +833,9 @@ enum hlsl_ir_expr_op
+     HLSL_OP2_MIN,
+     HLSL_OP2_MOD,
+     HLSL_OP2_MUL,
++    /* fxc2: the high 32 bits of the 64-bit product of two 32-bit integers,
++     * signed or unsigned as the type is. */
++    HLSL_OP2_MUL_HI,
+     HLSL_OP2_NEQUAL,
+     HLSL_OP2_RSHIFT,
+     /* SLT(a, b) retrieves 1.0 if (a < b), else 0.0. Only used for SM1-SM3 target vertex shaders. */
+diff --git a/libs/vkd3d-shader/hlsl.y b/libs/vkd3d-shader/hlsl.y
+index 62835535..5076dc73 100644
+--- a/libs/vkd3d-shader/hlsl.y
++++ b/libs/vkd3d-shader/hlsl.y
+@@ -3706,6 +3706,87 @@ static bool intrinsic_cosh(struct hlsl_ctx *ctx,
+     return write_cosh_or_sinh(ctx, params, loc, false);
+ }
+ 
++/* fxc2: what the imul and umul instructions compute and HLSL has no way to
++ * ask for, the high half of a 32 x 32 -> 64 bit product:
++ *
++ *     mulhi(a, b)                     the high half; signed for int, else unsigned
++ *     umulExtended(a, b, hi, lo)      both halves, as in GLSL
++ *     imulExtended(a, b, hi, lo)
++ *
++ * Asking for both halves of one product gives one instruction with both
++ * destinations. FXC knows none of these; see __FXC2__. */
++static struct hlsl_ir_node *add_mul_hi(struct hlsl_ctx *ctx, const struct parse_initializer *params,
++        enum hlsl_base_type base, struct hlsl_ir_node **lo, const struct vkd3d_shader_location *loc)
++{
++    struct hlsl_ir_node *operands[HLSL_MAX_OPERANDS] = {0};
++    const struct hlsl_type *arg1 = params->args[0]->data_type, *arg2 = params->args[1]->data_type;
++    unsigned int dimx;
++    struct hlsl_type *type;
++
++    if (arg1->class > HLSL_CLASS_VECTOR || arg2->class > HLSL_CLASS_VECTOR)
++    {
++        hlsl_error(ctx, loc, VKD3D_SHADER_ERROR_HLSL_INVALID_TYPE, "Extended multiplication takes scalars or vectors.");
++        return NULL;
++    }
++    if (hlsl_version_lt(ctx, 4, 0))
++    {
++        hlsl_error(ctx, loc, VKD3D_SHADER_ERROR_HLSL_INCOMPATIBLE_PROFILE,
++                "Extended multiplication needs shader model 4 or higher.");
++        return NULL;
++    }
++
++    if (arg1->class == HLSL_CLASS_SCALAR)
++        dimx = arg2->e.numeric.dimx;
++    else if (arg2->class == HLSL_CLASS_SCALAR)
++        dimx = arg1->e.numeric.dimx;
++    else
++        dimx = min(arg1->e.numeric.dimx, arg2->e.numeric.dimx);
++    type = hlsl_get_vector_type(ctx, base, dimx);
++
++    if (!(operands[0] = add_implicit_conversion(ctx, params->instrs, params->args[0], type, loc))
++            || !(operands[1] = add_implicit_conversion(ctx, params->instrs, params->args[1], type, loc)))
++        return NULL;
++    if (lo && !(*lo = add_expr(ctx, params->instrs, HLSL_OP2_MUL, operands, type, loc)))
++        return NULL;
++    return add_expr(ctx, params->instrs, HLSL_OP2_MUL_HI, operands, type, loc);
++}
++
++static bool intrinsic_mulhi(struct hlsl_ctx *ctx,
++        const struct parse_initializer *params, const struct vkd3d_shader_location *loc)
++{
++    const struct hlsl_type *arg1 = params->args[0]->data_type, *arg2 = params->args[1]->data_type;
++    bool is_signed = hlsl_is_numeric_type(arg1) && hlsl_is_numeric_type(arg2)
++            && arg1->e.numeric.type == HLSL_TYPE_INT && arg2->e.numeric.type == HLSL_TYPE_INT;
++
++    return !!add_mul_hi(ctx, params, is_signed ? HLSL_TYPE_INT : HLSL_TYPE_UINT, NULL, loc);
++}
++
++static bool intrinsic_mul_extended(struct hlsl_ctx *ctx, const struct parse_initializer *params,
++        enum hlsl_base_type base, const struct vkd3d_shader_location *loc)
++{
++    struct hlsl_ir_node *hi, *lo;
++
++    if (!(hi = add_mul_hi(ctx, params, base, &lo, loc)))
++        return false;
++    if (!add_assignment(ctx, params->instrs, params->args[2], ASSIGN_OP_ASSIGN, hi, false)
++            || !add_assignment(ctx, params->instrs, params->args[3], ASSIGN_OP_ASSIGN, lo, false))
++        return false;
++    add_void_expr(ctx, params->instrs, loc);
++    return true;
++}
++
++static bool intrinsic_umulExtended(struct hlsl_ctx *ctx,
++        const struct parse_initializer *params, const struct vkd3d_shader_location *loc)
++{
++    return intrinsic_mul_extended(ctx, params, HLSL_TYPE_UINT, loc);
++}
++
++static bool intrinsic_imulExtended(struct hlsl_ctx *ctx,
++        const struct parse_initializer *params, const struct vkd3d_shader_location *loc)
++{
++    return intrinsic_mul_extended(ctx, params, HLSL_TYPE_INT, loc);
++}
++
+ static bool intrinsic_countbits(struct hlsl_ctx *ctx,
+         const struct parse_initializer *params, const struct vkd3d_shader_location *loc)
+ {
+@@ -5858,6 +5939,7 @@ intrinsic_functions[] =
+     {"frac",                                1, true,  intrinsic_frac},
+     {"frexp",                               2, true,  intrinsic_frexp},
+     {"fwidth",                              1, true,  intrinsic_fwidth},
++    {"imulExtended",                        4, true,  intrinsic_imulExtended},
+     {"isfinite",                            1, true,  intrinsic_isfinite},
+     {"isinf",                               1, true,  intrinsic_isinf},
+     {"isnan",                               1, true,  intrinsic_isnan},
+@@ -5873,6 +5955,7 @@ intrinsic_functions[] =
+     {"min",                                 2, true,  intrinsic_min},
+     {"modf",                                2, true,  intrinsic_modf},
+     {"mul",                                 2, true,  intrinsic_mul},
++    {"mulhi",                               2, true,  intrinsic_mulhi},
+     {"noise",                               1, true,  intrinsic_noise},
+     {"normalize",                           1, true,  intrinsic_normalize},
+     {"pow",                                 2, true,  intrinsic_pow},
+@@ -5912,6 +5995,7 @@ intrinsic_functions[] =
+     {"texCUBEproj",                         2, false, intrinsic_texCUBEproj},
+     {"transpose",                           1, true,  intrinsic_transpose},
+     {"trunc",                               1, true,  intrinsic_trunc},
++    {"umulExtended",                        4, true,  intrinsic_umulExtended},
+ };
+ 
+ static int intrinsic_function_name_compare(const void *a, const void *b)
+diff --git a/libs/vkd3d-shader/hlsl_codegen.c b/libs/vkd3d-shader/hlsl_codegen.c
+index a5688033..bd34d41a 100644
+--- a/libs/vkd3d-shader/hlsl_codegen.c
++++ b/libs/vkd3d-shader/hlsl_codegen.c
+@@ -14821,6 +14821,12 @@ static bool sm4_generate_vsir_instr_expr(struct hlsl_ctx *ctx,
+                     return false;
+             }
+ 
++        case HLSL_OP2_MUL_HI:
++            /* fxc2 */
++            sm4_generate_vsir_expr_with_two_destinations(ctx, program,
++                    dst_type->e.numeric.type == HLSL_TYPE_INT ? VSIR_OP_IMUL : VSIR_OP_UMUL, expr, 0);
++            return true;
++
+         case HLSL_OP2_MOD:
+             switch (dst_type->e.numeric.type)
+             {
+diff --git a/libs/vkd3d-shader/ir.c b/libs/vkd3d-shader/ir.c
+index 7aafad2a..a0220505 100644
+--- a/libs/vkd3d-shader/ir.c
++++ b/libs/vkd3d-shader/ir.c
+@@ -13205,6 +13205,63 @@ static void vsir_program_fold_conditionals(struct vsir_program *program, struct
+     }
+ }
+ 
++static bool forward_same_source(const struct vsir_src_operand *a, const struct vsir_src_operand *b)
++{
++    if (a->reg.type != b->reg.type || a->modifiers || b->modifiers || a->reg.dimension != b->reg.dimension)
++        return false;
++    if (a->reg.type == VSIR_REGISTER_IMMCONST)
++        return !memcmp(a->reg.u.immconst_u32, b->reg.u.immconst_u32, sizeof(a->reg.u.immconst_u32));
++    return a->reg.type == VSIR_REGISTER_SSA && a->reg.idx[0].offset == b->reg.idx[0].offset
++            && a->swizzle == b->swizzle;
++}
++
++/* fxc2: imul and umul have two destinations, the high and the low half of
++ * the product. The two halves of one product come out of the HLSL compiler as
++ * two instructions with one destination each; make them one. (The low halves
++ * of the signed and of the unsigned product are the same.) */
++static void vsir_program_merge_multiplies(struct vsir_instruction **list, unsigned int count,
++        struct forward_ssa *ssa)
++{
++    for (unsigned int i = 0; i < count; ++i)
++    {
++        struct vsir_instruction *a = list[i], *b;
++        unsigned int have, want, j;
++
++        if ((a->opcode != VSIR_OP_IMUL && a->opcode != VSIR_OP_UMUL) || a->dst_count != 2 || a->src_count != 2)
++            continue;
++        if ((a->dst[0].reg.type == VSIR_REGISTER_NULL) == (a->dst[1].reg.type == VSIR_REGISTER_NULL))
++            continue;
++        have = a->dst[0].reg.type == VSIR_REGISTER_NULL;
++        want = !have;
++        if (a->dst[have].reg.type != VSIR_REGISTER_SSA)
++            continue;
++
++        for (j = i + 1; j < count && j - i <= 16; ++j)
++        {
++            b = list[j];
++            if (vsir_opcode_is_block_boundary(b->opcode))
++                break;
++            if ((b->opcode != VSIR_OP_IMUL && b->opcode != VSIR_OP_UMUL) || b->dst_count != 2 || b->src_count != 2
++                    || b->dst[want].reg.type != VSIR_REGISTER_SSA || b->dst[have].reg.type != VSIR_REGISTER_NULL
++                    || b->dst[want].write_mask != a->dst[have].write_mask
++                    || b->dst[want].modifiers || a->dst[have].modifiers)
++                continue;
++            if (!((forward_same_source(&a->src[0], &b->src[0]) && forward_same_source(&a->src[1], &b->src[1]))
++                    || (forward_same_source(&a->src[0], &b->src[1]) && forward_same_source(&a->src[1], &b->src[0]))))
++                continue;
++
++            /* The one that computes the high half says which product it is. */
++            if (want == 0)
++                a->opcode = b->opcode;
++            a->dst[want] = b->dst[want];
++            ssa[a->dst[want].reg.idx[0].offset].def = a;
++            ssa[a->dst[want].reg.idx[0].offset].def_index = i;
++            vsir_instruction_make_nop(b);
++            break;
++        }
++    }
++}
++
+ static enum vkd3d_result vsir_program_forward_destinations(struct vsir_program *program)
+ {
+     struct vsir_program_iterator it = vsir_program_iterator(&program->instructions);
+@@ -13253,6 +13310,8 @@ static enum vkd3d_result vsir_program_forward_destinations(struct vsir_program *
+         list[count++] = ins;
+     }
+ 
++    vsir_program_merge_multiplies(list, count, ssa);
++
+     for (unsigned int i = 0; i < count; ++i)
+     {
+         ins = list[i];
+diff --git a/libs/vkd3d-shader/tpf.c b/libs/vkd3d-shader/tpf.c
+index 15f90628..0955fcf3 100644
+--- a/libs/vkd3d-shader/tpf.c
++++ b/libs/vkd3d-shader/tpf.c
+@@ -4440,6 +4440,7 @@ static void tpf_handle_instruction(struct tpf_compiler *tpf, const struct vsir_i
+         case VSIR_OP_STORE_UAV_TYPED:
+         case VSIR_OP_SWITCH:
+         case VSIR_OP_UDIV:
++        case VSIR_OP_UMUL:
+         case VSIR_OP_UGE:
+         case VSIR_OP_ULT:
+         case VSIR_OP_UMAX:
+-- 
+2.53.0
+

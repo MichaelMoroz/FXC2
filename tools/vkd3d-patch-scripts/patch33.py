@@ -1,0 +1,665 @@
+import os
+import re
+base = os.path.expanduser("~/fxc2/vkd3d/libs/vkd3d-shader/")
+
+
+def edit(name, pairs):
+    path = base + name
+    s = open(path).read()
+    for old, new in pairs:
+        assert s.count(old) == 1, (name, old[:80], s.count(old))
+        s = s.replace(old, new)
+    open(path, "w").write(s)
+
+
+# struct hlsl_ir_node: liveness mark and enclosing control-flow instruction.
+path = base + "hlsl.h"
+s = open(path).read()
+m = re.search(r"struct hlsl_ir_node\n\{.*?\n\};", s, re.S)
+node = m.group(0)
+old = "    unsigned int last_use, loop_depth;"
+assert node.count(old) == 1
+s = s.replace(node, node.replace(old, old + '''
+    /* fxc2: for adce_execute(): whether the instruction is needed, and the
+     * if, loop or switch it is nested in. */
+    bool adce_live;
+    struct hlsl_ir_node *adce_parent;'''))
+old = '''    /* fxc2: liveness indices of the stores to the variable, in order; see
+'''
+assert s.count(old) == 1
+s = s.replace(old, '''    /* fxc2: for adce_execute(): every store to the variable, and whether the
+     * variable is read by anything that is needed. */
+    struct hlsl_ir_node **adce_stores;
+    size_t adce_store_count, adce_store_capacity;
+    bool adce_live;
+''' + old)
+open(path, "w").write(s)
+
+edit("hlsl.c", [
+    ('''    vkd3d_free(decl->store_indices);
+''', '''    vkd3d_free(decl->store_indices);
+    vkd3d_free(decl->adce_stores);
+'''),
+])
+
+ADCE = r'''/* fxc2: dead code elimination by liveness.
+ *
+ * dce() above removes a value nothing uses and a store nothing reads later.
+ * That leaves whatever feeds only itself: an accumulator in a loop whose final
+ * value is never used keeps the loop, and everything computed in it, alive.
+ * Shaders built from keyword variants are full of such code, and FXC drops
+ * it (one surface shader came out at 1150 instructions against FXC's 120).
+ *
+ * So work from the other end. Instructions with an effect of their own are
+ * needed: stores to outputs, writes to resources, discards. Whatever a needed
+ * instruction uses is needed: its operands; for a load, every store to that
+ * variable (this is not flow sensitive); and the if, loop or switch around it,
+ * which also needs its condition and the jumps that belong to it. Everything
+ * else is deleted, loops included, on the assumption that they terminate. */
+struct adce_state
+{
+    struct hlsl_ir_node **worklist;
+    size_t count, capacity;
+    bool failed;
+};
+
+static void adce_mark(struct hlsl_ctx *ctx, struct adce_state *state, struct hlsl_ir_node *instr)
+{
+    if (!instr || instr->adce_live)
+        return;
+    instr->adce_live = true;
+    if (!hlsl_array_reserve(ctx, (void **)&state->worklist, &state->capacity, state->count + 1,
+            sizeof(*state->worklist)))
+    {
+        state->failed = true;
+        return;
+    }
+    state->worklist[state->count++] = instr;
+}
+
+static void adce_mark_var(struct hlsl_ctx *ctx, struct adce_state *state, struct hlsl_ir_var *var)
+{
+    size_t i;
+
+    if (!var || var->adce_live)
+        return;
+    var->adce_live = true;
+    for (i = 0; i < var->adce_store_count; ++i)
+        adce_mark(ctx, state, var->adce_stores[i]);
+}
+
+static void adce_mark_deref(struct hlsl_ctx *ctx, struct adce_state *state, const struct hlsl_deref *deref,
+        bool reads_var)
+{
+    unsigned int i;
+
+    if (!deref->var)
+        return;
+    if (reads_var)
+        adce_mark_var(ctx, state, deref->var);
+    for (i = 0; i < deref->path_len; ++i)
+        adce_mark(ctx, state, deref->path[i].node);
+    adce_mark(ctx, state, deref->rel_offset.node);
+}
+
+/* Whether a store has to stay no matter what reads the variable. */
+static bool adce_store_is_root(const struct hlsl_ir_var *var)
+{
+    return var->is_output_semantic || var->is_input_semantic || var->is_uniform || var->is_tgsm
+            || var->is_separated_resource || !hlsl_is_numeric_type(hlsl_get_multiarray_element_type(var->data_type));
+}
+
+/* Clears the marks, records parents and the stores to each variable, and
+ * marks the instructions that are needed in their own right. */
+static void adce_collect(struct hlsl_ctx *ctx, struct adce_state *state, struct hlsl_block *block,
+        struct hlsl_ir_node *parent)
+{
+    struct hlsl_ir_node *instr;
+
+    LIST_FOR_EACH_ENTRY(instr, &block->instrs, struct hlsl_ir_node, entry)
+    {
+        instr->adce_live = false;
+        instr->adce_parent = parent;
+
+        switch (instr->type)
+        {
+            case HLSL_IR_CONSTANT:
+            case HLSL_IR_EXPR:
+            case HLSL_IR_INDEX:
+            case HLSL_IR_LOAD:
+            case HLSL_IR_RESOURCE_LOAD:
+            case HLSL_IR_SWIZZLE:
+                break;
+
+            case HLSL_IR_STORE:
+            {
+                struct hlsl_ir_var *var = hlsl_ir_store(instr)->lhs.var;
+
+                if (adce_store_is_root(var))
+                    adce_mark(ctx, state, instr);
+                else if (hlsl_array_reserve(ctx, (void **)&var->adce_stores, &var->adce_store_capacity,
+                        var->adce_store_count + 1, sizeof(*var->adce_stores)))
+                    var->adce_stores[var->adce_store_count++] = instr;
+                else
+                    state->failed = true;
+                break;
+            }
+
+            case HLSL_IR_IF:
+                adce_collect(ctx, state, &hlsl_ir_if(instr)->then_block, instr);
+                adce_collect(ctx, state, &hlsl_ir_if(instr)->else_block, instr);
+                break;
+
+            case HLSL_IR_LOOP:
+                adce_collect(ctx, state, &hlsl_ir_loop(instr)->body, instr);
+                adce_collect(ctx, state, &hlsl_ir_loop(instr)->iter, instr);
+                break;
+
+            case HLSL_IR_SWITCH:
+            {
+                struct hlsl_ir_switch_case *c;
+
+                LIST_FOR_EACH_ENTRY(c, &hlsl_ir_switch(instr)->cases, struct hlsl_ir_switch_case, entry)
+                    adce_collect(ctx, state, &c->body, instr);
+                break;
+            }
+
+            case HLSL_IR_JUMP:
+                /* Breaks and continues are needed when what they leave is. */
+                if (hlsl_ir_jump(instr)->type != HLSL_IR_JUMP_BREAK
+                        && hlsl_ir_jump(instr)->type != HLSL_IR_JUMP_CONTINUE)
+                    adce_mark(ctx, state, instr);
+                break;
+
+            case HLSL_IR_RESOURCE_STORE:
+            case HLSL_IR_INTERLOCKED:
+            case HLSL_IR_SYNC:
+                adce_mark(ctx, state, instr);
+                break;
+
+            default:
+                /* Something this pass does not know the operands of. */
+                state->failed = true;
+                break;
+        }
+    }
+}
+
+/* Marks the breaks (and for a loop the continues) that leave "container". */
+static void adce_mark_jumps(struct hlsl_ctx *ctx, struct adce_state *state, struct hlsl_block *block,
+        bool breaks, bool continues)
+{
+    struct hlsl_ir_node *instr;
+
+    LIST_FOR_EACH_ENTRY(instr, &block->instrs, struct hlsl_ir_node, entry)
+    {
+        if (instr->type == HLSL_IR_JUMP)
+        {
+            if ((breaks && hlsl_ir_jump(instr)->type == HLSL_IR_JUMP_BREAK)
+                    || (continues && hlsl_ir_jump(instr)->type == HLSL_IR_JUMP_CONTINUE))
+                adce_mark(ctx, state, instr);
+        }
+        else if (instr->type == HLSL_IR_IF)
+        {
+            adce_mark_jumps(ctx, state, &hlsl_ir_if(instr)->then_block, breaks, continues);
+            adce_mark_jumps(ctx, state, &hlsl_ir_if(instr)->else_block, breaks, continues);
+        }
+        else if (instr->type == HLSL_IR_SWITCH && continues)
+        {
+            /* A break in there leaves the switch, a continue still the loop. */
+            struct hlsl_ir_switch_case *c;
+
+            LIST_FOR_EACH_ENTRY(c, &hlsl_ir_switch(instr)->cases, struct hlsl_ir_switch_case, entry)
+                adce_mark_jumps(ctx, state, &c->body, false, true);
+        }
+    }
+}
+
+static void adce_propagate(struct hlsl_ctx *ctx, struct adce_state *state, struct hlsl_ir_node *instr)
+{
+    unsigned int i;
+
+    adce_mark(ctx, state, instr->adce_parent);
+
+    switch (instr->type)
+    {
+        case HLSL_IR_EXPR:
+            for (i = 0; i < HLSL_MAX_OPERANDS; ++i)
+                adce_mark(ctx, state, hlsl_ir_expr(instr)->operands[i].node);
+            break;
+
+        case HLSL_IR_SWIZZLE:
+            adce_mark(ctx, state, hlsl_ir_swizzle(instr)->val.node);
+            break;
+
+        case HLSL_IR_INDEX:
+            adce_mark(ctx, state, hlsl_ir_index(instr)->val.node);
+            adce_mark(ctx, state, hlsl_ir_index(instr)->idx.node);
+            break;
+
+        case HLSL_IR_LOAD:
+            adce_mark_deref(ctx, state, &hlsl_ir_load(instr)->src, true);
+            break;
+
+        case HLSL_IR_STORE:
+            adce_mark(ctx, state, hlsl_ir_store(instr)->rhs.node);
+            /* A store to part of a variable depends on the rest of it only
+             * through later loads, which mark the variable themselves. */
+            adce_mark_deref(ctx, state, &hlsl_ir_store(instr)->lhs, false);
+            break;
+
+        case HLSL_IR_RESOURCE_LOAD:
+        {
+            struct hlsl_ir_resource_load *load = hlsl_ir_resource_load(instr);
+
+            adce_mark_deref(ctx, state, &load->resource, true);
+            adce_mark_deref(ctx, state, &load->sampler, true);
+            adce_mark(ctx, state, load->byte_offset.node);
+            adce_mark(ctx, state, load->coords.node);
+            adce_mark(ctx, state, load->texel_offset.node);
+            adce_mark(ctx, state, load->lod.node);
+            adce_mark(ctx, state, load->ddx.node);
+            adce_mark(ctx, state, load->ddy.node);
+            adce_mark(ctx, state, load->sample_index.node);
+            adce_mark(ctx, state, load->cmp.node);
+            break;
+        }
+
+        case HLSL_IR_RESOURCE_STORE:
+        {
+            struct hlsl_ir_resource_store *store = hlsl_ir_resource_store(instr);
+
+            adce_mark_deref(ctx, state, &store->resource, true);
+            adce_mark(ctx, state, store->byte_offset.node);
+            adce_mark(ctx, state, store->coords.node);
+            adce_mark(ctx, state, store->value.node);
+            break;
+        }
+
+        case HLSL_IR_INTERLOCKED:
+        {
+            struct hlsl_ir_interlocked *interlocked = hlsl_ir_interlocked(instr);
+
+            adce_mark_deref(ctx, state, &interlocked->dst, true);
+            adce_mark(ctx, state, interlocked->coords.node);
+            adce_mark(ctx, state, interlocked->cmp_value.node);
+            adce_mark(ctx, state, interlocked->value.node);
+            break;
+        }
+
+        case HLSL_IR_JUMP:
+            adce_mark(ctx, state, hlsl_ir_jump(instr)->condition.node);
+            break;
+
+        case HLSL_IR_IF:
+            adce_mark(ctx, state, hlsl_ir_if(instr)->condition.node);
+            break;
+
+        case HLSL_IR_LOOP:
+            adce_mark(ctx, state, hlsl_ir_loop(instr)->unroll_limit.node);
+            adce_mark_jumps(ctx, state, &hlsl_ir_loop(instr)->body, true, true);
+            adce_mark_jumps(ctx, state, &hlsl_ir_loop(instr)->iter, true, true);
+            break;
+
+        case HLSL_IR_SWITCH:
+        {
+            struct hlsl_ir_switch_case *c;
+
+            adce_mark(ctx, state, hlsl_ir_switch(instr)->selector.node);
+            LIST_FOR_EACH_ENTRY(c, &hlsl_ir_switch(instr)->cases, struct hlsl_ir_switch_case, entry)
+                adce_mark_jumps(ctx, state, &c->body, true, false);
+            break;
+        }
+
+        default:
+            break;
+    }
+}
+
+/* Deletes what is not needed, last instruction first, so that every value is
+ * freed after its users. */
+static bool adce_sweep(struct hlsl_ctx *ctx, struct hlsl_block *block)
+{
+    struct hlsl_ir_node *instr, *next;
+    bool progress = false;
+
+    LIST_FOR_EACH_ENTRY_SAFE_REV(instr, next, &block->instrs, struct hlsl_ir_node, entry)
+    {
+        if (instr->type == HLSL_IR_IF)
+        {
+            progress |= adce_sweep(ctx, &hlsl_ir_if(instr)->then_block);
+            progress |= adce_sweep(ctx, &hlsl_ir_if(instr)->else_block);
+        }
+        else if (instr->type == HLSL_IR_LOOP)
+        {
+            progress |= adce_sweep(ctx, &hlsl_ir_loop(instr)->iter);
+            progress |= adce_sweep(ctx, &hlsl_ir_loop(instr)->body);
+        }
+        else if (instr->type == HLSL_IR_SWITCH)
+        {
+            struct hlsl_ir_switch_case *c;
+
+            LIST_FOR_EACH_ENTRY_REV(c, &hlsl_ir_switch(instr)->cases, struct hlsl_ir_switch_case, entry)
+                progress |= adce_sweep(ctx, &c->body);
+        }
+
+        if (!instr->adce_live)
+        {
+            list_remove(&instr->entry);
+            hlsl_free_instr(instr);
+            progress = true;
+        }
+    }
+    return progress;
+}
+
+static bool adce_execute(struct hlsl_ctx *ctx, struct hlsl_block *body)
+{
+    struct adce_state state = {0};
+    struct hlsl_scope *scope;
+    struct hlsl_ir_var *var;
+    bool progress = false;
+
+    /* Hull shaders pass values between their two functions through variables
+     * this pass cannot see both sides of. */
+    if (ctx->profile->type == VKD3D_SHADER_TYPE_HULL)
+        return false;
+
+    LIST_FOR_EACH_ENTRY(scope, &ctx->scopes, struct hlsl_scope, entry)
+    {
+        LIST_FOR_EACH_ENTRY(var, &scope->vars, struct hlsl_ir_var, scope_entry)
+        {
+            var->adce_store_count = 0;
+            var->adce_live = false;
+        }
+    }
+
+    adce_collect(ctx, &state, body, NULL);
+    while (state.count && !state.failed)
+        adce_propagate(ctx, &state, state.worklist[--state.count]);
+    if (!state.failed)
+        progress = adce_sweep(ctx, body);
+
+    vkd3d_free(state.worklist);
+    return progress;
+}
+
+'''
+
+edit("hlsl_codegen.c", [
+    ('''static bool hlsl_tuning_enabled(const char *variable, bool default_value);
+
+/* fxc2: scalar replacement of aggregates.''', ADCE + '''static bool hlsl_tuning_enabled(const char *variable, bool default_value);
+
+/* fxc2: scalar replacement of aggregates.'''),
+    ('''    if (hlsl_version_ge(ctx, 4, 0) && hlsl_tuning_enabled("VKD3D_HLSL_SPLIT_STRUCTS", true)
+            && sroa_execute(ctx, body))
+        hlsl_run_const_passes(ctx, body);
+''', '''    if (hlsl_version_ge(ctx, 4, 0) && hlsl_tuning_enabled("VKD3D_HLSL_ADCE", true)
+            && adce_execute(ctx, body))
+        hlsl_run_const_passes(ctx, body);
+
+    if (hlsl_version_ge(ctx, 4, 0) && hlsl_tuning_enabled("VKD3D_HLSL_SPLIT_STRUCTS", true)
+            && sroa_execute(ctx, body))
+        hlsl_run_const_passes(ctx, body);
+'''),
+    # switches stay switches by default (see the README); the lowering remains available.
+    ('''    if (hlsl_version_ge(ctx, 4, 0) && !hlsl_tuning_enabled("VKD3D_HLSL_SWITCH", false))
+        hlsl_transform_ir(ctx, lower_switch_to_ifs, body, NULL);
+''', '''    /* fxc2: off by default. FXC keeps some switches and not others by a rule
+     * of its own; turning them all into if chains made shaders that pick one
+     * of several textures bigger, and measured no gain where it shrank them. */
+    if (hlsl_version_ge(ctx, 4, 0) && !hlsl_tuning_enabled("VKD3D_HLSL_SWITCH", true))
+        hlsl_transform_ir(ctx, lower_switch_to_ifs, body, NULL);
+'''),
+    ('''                && hlsl_tuning_enabled("VKD3D_HLSL_RETURN_SWITCH", true))''',
+     '''                && hlsl_tuning_enabled("VKD3D_HLSL_RETURN_SWITCH", false))'''),
+])
+print("patched")
+
+# dot(x, 0) is 0, as x * 0 already is; lighting code with a light switched off
+# by a keyword is full of it, and what it feeds then folds away too.
+edit("hlsl_constant_ops.c", [
+    ('''        case HLSL_OP2_LOGIC_AND:
+            if (hlsl_constant_is_zero(const_arg))
+                return &const_arg->node;
+            else if (hlsl_constant_is_one(const_arg))
+                return mut_arg;
+            break;
+''', '''        case HLSL_OP2_DOT:
+            /* fxc2 */
+            if (hlsl_constant_is_zero(const_arg) && !ctx->compile_info.enforce_ieee_754_fp)
+                return hlsl_block_add_constant(ctx, block, instr->data_type, &zero, &instr->loc);
+            break;
+
+        case HLSL_OP2_LOGIC_AND:
+            if (hlsl_constant_is_zero(const_arg))
+                return &const_arg->node;
+            else if (hlsl_constant_is_one(const_arg))
+                return mut_arg;
+            break;
+'''),
+])
+print("patched 2")
+
+# Flow sensitivity for the above, the cheap way: a variable that is assigned
+# as a whole at the top level of the function is a new variable from there on.
+path = base + "hlsl.h"
+s = open(path).read()
+old = '''    bool adce_live;
+'''
+assert s.count(old) == 2
+s = s.replace('''    size_t adce_store_count, adce_store_capacity;
+    bool adce_live;
+''', '''    size_t adce_store_count, adce_store_capacity;
+    bool adce_live;
+    /* fxc2: for adce_split_live_ranges(): whether the variable was referenced
+     * yet, and the variable that stands for it from here on. */
+    bool adce_seen;
+    struct hlsl_ir_var *adce_rename, *adce_origin;
+''')
+open(path, "w").write(s)
+
+edit("hlsl_codegen.c", [
+    ('''static bool adce_execute(struct hlsl_ctx *ctx, struct hlsl_block *body)
+{
+    struct adce_state state = {0};
+    struct hlsl_scope *scope;
+    struct hlsl_ir_var *var;
+    bool progress = false;
+
+    /* Hull shaders pass values between their two functions through variables
+     * this pass cannot see both sides of. */
+    if (ctx->profile->type == VKD3D_SHADER_TYPE_HULL)
+        return false;
+
+    LIST_FOR_EACH_ENTRY(scope, &ctx->scopes, struct hlsl_scope, entry)
+    {
+        LIST_FOR_EACH_ENTRY(var, &scope->vars, struct hlsl_ir_var, scope_entry)
+        {
+            var->adce_store_count = 0;
+            var->adce_live = false;
+        }
+    }
+
+    adce_collect(ctx, &state, body, NULL);
+''', '''static void adce_rename_deref(struct hlsl_deref *deref, bool restore)
+{
+    if (!deref->var)
+        return;
+    if (restore)
+    {
+        if (deref->var->adce_origin)
+            deref->var = deref->var->adce_origin;
+        return;
+    }
+    deref->var->adce_seen = true;
+    if (deref->var->adce_rename)
+        deref->var = deref->var->adce_rename;
+}
+
+static void adce_rename_block(struct hlsl_block *block, bool restore);
+
+static void adce_rename_instr(struct hlsl_ir_node *instr, bool restore)
+{
+    if (instr->type == HLSL_IR_LOAD)
+    {
+        adce_rename_deref(&hlsl_ir_load(instr)->src, restore);
+    }
+    else if (instr->type == HLSL_IR_STORE)
+    {
+        adce_rename_deref(&hlsl_ir_store(instr)->lhs, restore);
+    }
+    else if (instr->type == HLSL_IR_IF)
+    {
+        adce_rename_block(&hlsl_ir_if(instr)->then_block, restore);
+        adce_rename_block(&hlsl_ir_if(instr)->else_block, restore);
+    }
+    else if (instr->type == HLSL_IR_LOOP)
+    {
+        adce_rename_block(&hlsl_ir_loop(instr)->body, restore);
+        adce_rename_block(&hlsl_ir_loop(instr)->iter, restore);
+    }
+    else if (instr->type == HLSL_IR_SWITCH)
+    {
+        struct hlsl_ir_switch_case *c;
+
+        LIST_FOR_EACH_ENTRY(c, &hlsl_ir_switch(instr)->cases, struct hlsl_ir_switch_case, entry)
+            adce_rename_block(&c->body, restore);
+    }
+}
+
+static void adce_rename_block(struct hlsl_block *block, bool restore)
+{
+    struct hlsl_ir_node *instr;
+
+    LIST_FOR_EACH_ENTRY(instr, &block->instrs, struct hlsl_ir_node, entry)
+        adce_rename_instr(instr, restore);
+}
+
+/* The marking above does not look at the order of things: one load of a
+ * variable keeps every store to it. Lighting code typically fills in a
+ * structure, resets it and fills it in again, and the first lot would stay.
+ * An assignment to a whole variable at the top level of the function is
+ * always executed and replaces everything that was in it, so the variable can
+ * just as well be a different one from there on.
+ *
+ * Once the dead code is gone the variables are made one again: which values
+ * share a variable decides which share a register later, and there is no
+ * reason to change that for code that was not touched. */
+static void adce_split_live_ranges(struct hlsl_ctx *ctx, struct hlsl_block *body)
+{
+    struct hlsl_ir_node *instr;
+
+    LIST_FOR_EACH_ENTRY(instr, &body->instrs, struct hlsl_ir_node, entry)
+    {
+        struct hlsl_ir_store *store;
+        struct hlsl_ir_var *var;
+
+        if (instr->type == HLSL_IR_STORE && !(store = hlsl_ir_store(instr))->lhs.path_len
+                && !adce_store_is_root(var = store->lhs.var)
+                && (var->data_type->class > HLSL_CLASS_VECTOR
+                ? !store->writemask : store->writemask == (1u << var->data_type->e.numeric.dimx) - 1))
+        {
+            if (var->adce_seen && (var->adce_rename = hlsl_new_synthetic_var(ctx, "split",
+                    var->data_type, &var->loc)))
+                var->adce_rename->adce_origin = var;
+            var->adce_seen = true;
+            if (var->adce_rename)
+                store->lhs.var = var->adce_rename;
+        }
+        else
+        {
+            adce_rename_instr(instr, false);
+        }
+    }
+}
+
+static bool adce_execute(struct hlsl_ctx *ctx, struct hlsl_block *body)
+{
+    struct adce_state state = {0};
+    struct hlsl_scope *scope;
+    struct hlsl_ir_var *var;
+    bool progress = false, split;
+
+    /* Hull shaders pass values between their two functions through variables
+     * this pass cannot see both sides of. */
+    if (ctx->profile->type == VKD3D_SHADER_TYPE_HULL)
+        return false;
+
+    LIST_FOR_EACH_ENTRY(scope, &ctx->scopes, struct hlsl_scope, entry)
+    {
+        LIST_FOR_EACH_ENTRY(var, &scope->vars, struct hlsl_ir_var, scope_entry)
+        {
+            var->adce_store_count = 0;
+            var->adce_live = false;
+            var->adce_seen = false;
+            var->adce_rename = NULL;
+        }
+    }
+
+    if ((split = hlsl_tuning_enabled("VKD3D_HLSL_SPLIT_RANGES", true)))
+        adce_split_live_ranges(ctx, body);
+    adce_collect(ctx, &state, body, NULL);
+'''),
+    ('''    if (hlsl_version_ge(ctx, 4, 0) && hlsl_tuning_enabled("VKD3D_HLSL_SPLIT_STRUCTS", true)
+            && sroa_execute(ctx, body))
+        hlsl_run_const_passes(ctx, body);
+''', '''    if (hlsl_version_ge(ctx, 4, 0) && hlsl_tuning_enabled("VKD3D_HLSL_SPLIT_STRUCTS", true)
+            && sroa_execute(ctx, body))
+        hlsl_run_const_passes(ctx, body);
+
+    /* fxc2: again, now that structures are separate variables. */
+    if (hlsl_version_ge(ctx, 4, 0) && hlsl_tuning_enabled("VKD3D_HLSL_ADCE", true)
+            && adce_execute(ctx, body))
+        hlsl_run_const_passes(ctx, body);
+'''),
+])
+print("patched 3")
+
+edit("hlsl_codegen.c", [
+    ('''    if (!state.failed)
+        progress = adce_sweep(ctx, body);
+''', '''    if (!state.failed)
+        progress = adce_sweep(ctx, body);
+    if (split)
+        adce_rename_block(body, true);
+'''),
+    # switch lowering stays the default after all: it is worth 2-3% on ShaderEmu.
+    ('''    if (hlsl_version_ge(ctx, 4, 0) && !hlsl_tuning_enabled("VKD3D_HLSL_SWITCH", true))''',
+     '''    if (hlsl_version_ge(ctx, 4, 0) && !hlsl_tuning_enabled("VKD3D_HLSL_SWITCH", false))'''),
+    ('''                && hlsl_tuning_enabled("VKD3D_HLSL_RETURN_SWITCH", false))''',
+     '''                && hlsl_tuning_enabled("VKD3D_HLSL_RETURN_SWITCH", true))'''),
+])
+print("patched 4")
+
+# Removing dead code makes small branches flattenable that were not before;
+# put the component stores in them together first, or each component is
+# selected separately.
+edit("hlsl_codegen.c", [
+    ('''    if (hlsl_version_ge(ctx, 4, 0) && hlsl_tuning_enabled("VKD3D_HLSL_ADCE", true)
+            && adce_execute(ctx, body))
+        hlsl_run_const_passes(ctx, body);
+
+    if (hlsl_version_ge(ctx, 4, 0) && hlsl_tuning_enabled("VKD3D_HLSL_SPLIT_STRUCTS", true)''',
+     '''    if (hlsl_version_ge(ctx, 4, 0) && hlsl_tuning_enabled("VKD3D_HLSL_ADCE", true))
+        adce_execute(ctx, body);
+
+    if (hlsl_version_ge(ctx, 4, 0) && hlsl_tuning_enabled("VKD3D_HLSL_SPLIT_STRUCTS", true)'''),
+    ('''    /* fxc2: again, now that structures are separate variables. */
+    if (hlsl_version_ge(ctx, 4, 0) && hlsl_tuning_enabled("VKD3D_HLSL_ADCE", true)
+            && adce_execute(ctx, body))
+        hlsl_run_const_passes(ctx, body);
+''', '''    /* fxc2: again, now that structures are separate variables. Removing dead
+     * code makes small branches flattenable that were not before; put the
+     * component stores in them together first, or each component is selected
+     * separately. */
+    if (hlsl_version_ge(ctx, 4, 0) && hlsl_tuning_enabled("VKD3D_HLSL_ADCE", true)
+            && adce_execute(ctx, body))
+    {
+        vectorize_stores(ctx, body);
+        hlsl_run_const_passes(ctx, body);
+    }
+'''),
+])
+print("patched 5")

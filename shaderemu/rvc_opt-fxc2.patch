@@ -1,0 +1,295 @@
+diff --git a/experiments/rvc_opt/README.md b/experiments/rvc_opt/README.md
+index 998e668..ec1660d 100644
+--- a/experiments/rvc_opt/README.md
++++ b/experiments/rvc_opt/README.md
+@@ -18,6 +18,7 @@ Only these remain in the source:
+ | `NO_DOUBLES` | timer value from the host instead of double math (needed on D3D12) |
+ | `PROFILE` | `PROF()` event counters through a UAV |
+ | `L1_SET_BITS`, `L1_SLICES`, `TLB2_N`, `RAM_TILE_BITS` | cache, TLB and layout sizes |
++| `L1_LOCAL`, `L1_STATIC` | the big arrays as locals of the pass (23 below): on with fxc2, off with FXC |
+ 
+ Everything else named in this document (`OPT_BASELINE`, the `OPT_*` experiments, `XREG_*`,
+ `MULH_DOUBLES`, `L1_HASH_LOW`, `RAM_TILE_ZORDER`) was a switch that existed while it was being
+@@ -94,6 +95,38 @@ pass-local (`static`), never stored in the texture.
+     read has finished long before its instructions are needed.
+ 21. **Second-level TLB grown to 256 entries per mode.**
+ 
++22. **`sfence.vma` for one page** (`emu.h`, `mmu.h`): with an address in rs1 only the entries
++    that could translate that address are dropped (all three access modes, any privilege
++    context; the megapage entry covering it too) instead of every entry. Linux flushes single
++    pages far more often than everything, and after a full flush each page touched next is a
++    page walk on the general path. Over a cold boot: 351k page walks become 141k, 97.8% of
++    instructions on the fast path become 98.4%, same instruction count and console output.
++23. **Write cache and second-level TLB as local arrays** (`L1_LOCAL`; `l1_local.h`, `mmu.h`,
++    `main.shader`): the three big arrays are locals of the tick's `frag`, handed down as `inout`
++    arguments, and so are not zeroed at the start of every pass: 1024 `uint4` and twice 768
++    `uint`, about 0.4 ms of the 0.8 ms a pass costs before it has emulated anything. The TLB
++    got an occupancy bitmap for it, like the write cache had (and a second one for entries
++    flushed by 22, which must also hide what the texture still holds). This needs a compiler
++    that works on an `inout` array in place: fxc2 (it defines `__FXC2__`, which switches this
++    on) and DXC do. FXC copies the array at every call and fails ("can't unroll loops marked
++    with loop attribute"), so under FXC the arrays stay static. `L1_STATIC` keeps them static
++    under fxc2 too.
++
++24. **MULH in one instruction** (`emu.h`): the GPU's `umul` and `imul` return both halves of a
++    32 x 32 bit product, which HLSL cannot ask for. fxc2 adds `mulhi()` (and `umulExtended()`,
++    `imulExtended()`), so with `__FXC2__` `mulhu32()` is that one instruction instead of four
++    multiplications and a carry chain, and `mulh` needs no sign corrections. Our raytracer
++    (73,669,730 instructions, machine mode): 4.18M IPS against 3.96M to 4.13M without, same
++    final state. Under FXC the partial products remain.
++
++With 22 and 23, D3D11, bytecode from fxc2, same machine and the same state hash in each column
++(emulation is unchanged; only the TLB's bookkeeping texels differ from before 22):
++
++| Build | 6000-frame bench, 2,048 ticks | fixed cost per pass | Cold boot (21,000 frames) |
++| --- | --- | --- | --- |
++| static arrays (`L1_STATIC`) | 1,502k IPS | 0.80 ms | 29.9 s |
++| local arrays (default with fxc2) | 1,951k IPS | 0.39 ms | 22.6 s |
++
+ 6 to 21 were once switchable (`OPT_BASELINE` built without them); they are now unconditional. `OPT_ALU_SELECT`
+ replaces the inner funct3 switch of 6 with a branch-free select; it measured within noise of
+ the switch, so it is off.
+diff --git a/experiments/rvc_opt/main.shader b/experiments/rvc_opt/main.shader
+index ff52aba..f1ff964 100644
+--- a/experiments/rvc_opt/main.shader
++++ b/experiments/rvc_opt/main.shader
+@@ -112,6 +112,10 @@
+                 uint2 pos = i.globalTexcoord.xy * s_dim;
+ #ifdef L1_LOCAL
+                 uint4 l1_cache[L1_ENTRIES];
++#ifndef NO_PAGING
++                uint tlb2_tag[3 * TLB2_N];
++                uint tlb2_pg[3 * TLB2_N];
++#endif
+ #endif
+ 
+                 _Ticks /= max(_TicksDivisor, 1);
+diff --git a/experiments/rvc_opt/src/emu.h b/experiments/rvc_opt/src/emu.h
+index fa4ae03..5f4fa92 100644
+--- a/experiments/rvc_opt/src/emu.h
++++ b/experiments/rvc_opt/src/emu.h
+@@ -312,16 +312,31 @@ DEF(mul, FormatR, { // rv32m
+ // Exact high word of a 32x32 multiply from 16-bit partial products, for hosts whose double
+ // support cannot be trusted. Upstream's double version rounds once the product needs more
+ // than 53 bits, so results differ from it there.
++//
++// The GPU has had the instruction for this all along (umul and imul return both halves of the
++// product), HLSL just cannot ask for it. fxc2 can: mulhi() there is that one instruction.
+ uint mulhu32(uint a, uint b) {
++#ifdef __FXC2__
++    return mulhi(a, b);
++#else
+     uint al = a & 0xffff, ah = a >> 16, bl = b & 0xffff, bh = b >> 16;
+     uint lh = al * bh, hl = ah * bl;
+     uint mid = ((al * bl) >> 16) + (lh & 0xffff) + (hl & 0xffff);
+     return ah * bh + (lh >> 16) + (hl >> 16) + (mid >> 16);
++#endif
++}
++// the high word of the signed product
++uint mulhs32(uint a, uint b) {
++#ifdef __FXC2__
++    return AS_UNSIGNED(mulhi(AS_SIGNED(a), AS_SIGNED(b)));
++#else
++    return mulhu32(a, b) - ((a >> 31) ? b : 0) - ((b >> 31) ? a : 0);
++#endif
+ }
+ DEF(mulh, FormatR, { // rv32m
+     uint a = xreg(ins.rs1);   // one declaration each: Unity's preprocessor splits macro arguments at this comma
+     uint b = xreg(ins.rs2);
+-    WR_RD(mulhu32(a, b) - ((a >> 31) ? b : 0) - ((b >> 31) ? a : 0))
++    WR_RD(mulhs32(a, b))
+ })
+ DEF(mulhsu, FormatR, { // rv32m
+     uint a = xreg(ins.rs1);   // one declaration each: Unity's preprocessor splits macro arguments at this comma
+@@ -378,7 +393,14 @@ DEF(sc_w, FormatR, { // rv32a
+ })
+ DEF(sfence_vma, FormatEmpty, { // system
+     hot_flush();
+-    tlb2_flush();
++    // rs1 names the one page to flush, x0 means all of them (rs2, the address space, is ignored:
++    // flushing more than asked is allowed)
++    uint sf_rs1 = (ins_word >> 15) & 0x1f;
++    if (sf_rs1 != 0) {
++        tlb2_flush_page(xreg(sf_rs1));
++    } else {
++        tlb2_flush();
++    }
+     /* cpu.stall = STALL_FENCE; */
+ })
+ DEF(sh, FormatS, { // rv32i
+@@ -818,11 +840,12 @@ static bool xl_ident_d = false;  // loads/stores: paging off, or machine mode wi
+     [branch] if (!ok) { \
+         uint ok##_k = TLB2_IDX(mode, va); \
+         uint ok##_pg = tlb2_pg[ok##_k]; \
+-        bool ok##_l2 = tlb2_tag[ok##_k] == TLB2_TAG(va, xl_ctx); \
++        bool ok##_l2 = TLB2_HIT(ok##_k, TLB2_TAG(va, xl_ctx)); \
+         [branch] if (!ok##_l2) { \
+             if (tlb2_saved(ok##_k, TLB2_TAG(va, xl_ctx), ok##_pg)) { \
+                 tlb2_tag[ok##_k] = TLB2_TAG(va, xl_ctx); \
+                 tlb2_pg[ok##_k] = ok##_pg; \
++                TLB2_OCC_SET(ok##_k) \
+                 ok##_l2 = true; \
+             } \
+         } \
+@@ -981,7 +1004,7 @@ bool fast_exec_l1(L1P uint w) {
+                 [forcecase]
+                 switch (f3) {
+                     case 0: val = a * b; break;
+-                    case 1: val = mulhu32(a, b) - ((a >> 31) ? b : 0) - ((b >> 31) ? a : 0); break;
++                    case 1: val = mulhs32(a, b); break;
+                     case 2: val = mulhu32(a, b) - ((a >> 31) ? b : 0); break;
+                     case 3: val = mulhu32(a, b); break;
+                     case 4: val = by_zero ? 0xFFFFFFFF : wraps ? a : AS_UNSIGNED(sa / sb); break;
+diff --git a/experiments/rvc_opt/src/l1_local.h b/experiments/rvc_opt/src/l1_local.h
+index 8345953..55b263f 100644
+--- a/experiments/rvc_opt/src/l1_local.h
++++ b/experiments/rvc_opt/src/l1_local.h
+@@ -1,17 +1,38 @@
+ // The write cache as a parameter of every function that reaches it, so that it can be a
+ // local array of the tick (L1_LOCAL), which unlike a static one is not zeroed every run.
+ // A function listed here is defined as NAME_l1(L1P ...); one without arguments is called as NAME_l1(L1A0).
++//
++// The second-level TLB's two arrays travel with it for the same reason (mmu.h): they have an
++// occupancy bitmap as well, so neither needs to start out zeroed.
++#ifndef TLB2_N
++#define TLB2_N 256
++#endif
++//
++// This needs a compiler that works on an inout array in place. fxc2 (which defines __FXC2__) and
++// DXC do; FXC copies the array at every call and gives up, so it keeps the static arrays unless
++// L1_LOCAL is asked for by name. L1_STATIC keeps them with fxc2 as well.
++#if defined(__FXC2__) && !defined(L1_STATIC) && !defined(L1_LOCAL)
++#define L1_LOCAL
++#endif
+ #if defined(L1_LOCAL) && defined(PASS_TICK)
+-#define L1P inout uint4 l1_cache[L1_ENTRIES],
+-#define L1P0 inout uint4 l1_cache[L1_ENTRIES]
+-#define L1A l1_cache,
+-#define L1A0 l1_cache
++#if defined(NO_PAGING) || defined(M_MODE_ONLY)
++#define L1_ARRAYS_P inout uint4 l1_cache[L1_ENTRIES]
++#define L1_ARRAYS_A l1_cache
++#else
++#define L1_ARRAYS_P inout uint4 l1_cache[L1_ENTRIES], inout uint tlb2_tag[3 * TLB2_N], inout uint tlb2_pg[3 * TLB2_N]
++#define L1_ARRAYS_A l1_cache, tlb2_tag, tlb2_pg
++#endif
++#define L1P L1_ARRAYS_P,
++#define L1P0 L1_ARRAYS_P
++#define L1A L1_ARRAYS_A,
++#define L1A0 L1_ARRAYS_A
+ #else
+ #define L1P
+ #define L1P0
+ #define L1A
+ #define L1A0
+ #endif
++#define tlb_state_texel(a0, a1) tlb_state_texel_l1(L1A a0, a1)
+ #define encode(a0) encode_l1(L1A a0)
+ #define fast_exec(a0) fast_exec_l1(L1A a0)
+ #define fast_run(a0) fast_run_l1(L1A a0)
+diff --git a/experiments/rvc_opt/src/mmu.h b/experiments/rvc_opt/src/mmu.h
+index 75a7e0f..a91ac94 100644
+--- a/experiments/rvc_opt/src/mmu.h
++++ b/experiments/rvc_opt/src/mmu.h
+@@ -38,8 +38,21 @@ static uint fetch_vpn = 0xffffffff, fetch_page;  // last translated fetch page (
+ #ifndef TLB2_N
+ #define TLB2_N 256
+ #endif
++// With L1_LOCAL the two arrays are locals of the tick's main, handed down like the write cache
++// (l1_local.h), and start undefined. Either way an entry counts only when its bit in tlb2_occ
++// says it was written in this pass, and a bit in tlb2_dead says that what the last pass left
++// in the texture for that entry has been flushed since.
++#if !(defined(L1_LOCAL) && defined(PASS_TICK))
+ static uint tlb2_tag[3 * TLB2_N];
+ static uint tlb2_pg[3 * TLB2_N];
++#endif
++#define TLB2_WORDS ((3 * TLB2_N + 31) / 32)
++static uint tlb2_occ[TLB2_WORDS];
++static uint tlb2_dead[TLB2_WORDS];
++#define TLB2_OCC(k) (((tlb2_occ[(k) >> 5] >> ((k) & 31)) & 1) != 0)
++#define TLB2_OCC_SET(k) tlb2_occ[(k) >> 5] |= 1u << ((k) & 31);
++#define TLB2_DEAD(k) (((tlb2_dead[(k) >> 5] >> ((k) & 31)) & 1) != 0)
++#define TLB2_HIT(k, tag) (TLB2_OCC(k) && tlb2_tag[k] == (tag))
+ static uint tlb2_gen = 1;
+ static bool tlb_wiped = false;   // the generations wrapped in this pass: what the last pass left is void
+ // Megapage TLB, behind the second level: one entry maps 4 MiB, which is how a kernel maps its
+@@ -53,10 +66,22 @@ static uint tlbm_pg[3 * TLBM_N];
+ static uint xl_ctx = 0;  // current privilege context, refreshed by the general path
+ #define TLB2_IDX(mode, va) ((mode) * TLB2_N + (((va) >> 12) & (TLB2_N - 1)))
+ #define TLB2_TAG(va, ctx) (((va) >> 12) | ((ctx) << 20) | (tlb2_gen << 24))
++// sfence.vma for one page: only what could translate that address goes, in all three access
++// modes and whatever the privilege context. An entry for another page in the same slot goes
++// with it, which is allowed. Linux flushes single pages far more often than everything, and
++// after a full flush every page touched next costs a page walk on the general path.
++void tlb2_flush_page(uint va) {
++    for (uint fm = 0; fm < 3; fm++) {
++        uint fk = TLB2_IDX(fm, va);
++        tlb2_occ[fk >> 5] &= ~(1u << (fk & 31));
++        tlb2_dead[fk >> 5] |= 1u << (fk & 31);
++        tlbm_tag[TLBM_IDX(fm, va)] = 0;
++    }
++}
+ void tlb2_flush() {
+     tlb2_gen++;
+     if (tlb2_gen == 256) {
+-        for (uint k2 = 0; k2 < 3 * TLB2_N; k2++) tlb2_tag[k2] = 0;
++        for (uint k2 = 0; k2 < TLB2_WORDS; k2++) tlb2_occ[k2] = 0;
+         for (uint km = 0; km < 3 * TLBM_N; km++) tlbm_tag[km] = 0;
+         tlb2_gen = 1;
+         tlb_wiped = true;
+@@ -87,20 +112,22 @@ bool tlb2_saved(uint k, uint tag, inout uint page) {
+     uint at = TLB_STATE_AT + (k >> 1);
+     uint4 t = STATE_TEX(uint2(at & 63, at >> 6));
+     bool odd = (k & 1) != 0;
+-    if (tlb_wiped || (odd ? t.b : t.r) != tag) return false;
++    if (tlb_wiped || TLB2_DEAD(k) || (odd ? t.b : t.r) != tag) return false;
+     page = odd ? t.a : t.g;
+     return true;
+ }
+ // What a pixel of the TLB's texels holds after this pass; false for any other pixel.
+-bool tlb_state_texel(uint2 pos, out uint4 t) {
++bool tlb_state_texel_l1(L1P uint2 pos, out uint4 t) {
+     uint k = pos.x + 64 * pos.y - TLB_STATE_AT;
+     t = 0;
+     if (pos.x + 64 * pos.y < TLB_STATE_AT || k >= TLB_STATE_TEXELS) return false;
+     if (k < 3 * TLB2_N / 2) {
+         // an entry made in this pass (its tag has the generation), or the one already there
+         uint4 was = tlb_wiped ? (uint4)0 : STATE_TEX(pos);
+-        bool a = tlb2_tag[2 * k] != 0 && (tlb2_tag[2 * k] >> 24) == tlb2_gen;
+-        bool b = tlb2_tag[2 * k + 1] != 0 && (tlb2_tag[2 * k + 1] >> 24) == tlb2_gen;
++        bool a = TLB2_OCC(2 * k) && (tlb2_tag[2 * k] >> 24) == tlb2_gen;
++        bool b = TLB2_OCC(2 * k + 1) && (tlb2_tag[2 * k + 1] >> 24) == tlb2_gen;
++        if (TLB2_DEAD(2 * k)) was.rg = 0;
++        if (TLB2_DEAD(2 * k + 1)) was.ba = 0;
+         t = uint4(a ? tlb2_tag[2 * k] : was.r, a ? tlb2_pg[2 * k] : was.g, b ? tlb2_tag[2 * k + 1] : was.b, b ? tlb2_pg[2 * k + 1] : was.a);
+     } else if (k < TLB_STATE_TEXELS - 1) {
+         uint m = k - 3 * TLB2_N / 2;
+@@ -114,6 +141,7 @@ bool tlb_state_texel(uint2 pos, out uint4 t) {
+ 
+ #else
+ void tlb2_flush() {}
++void tlb2_flush_page(uint va) {}
+ #endif
+ 
+ void hot_flush() {
+@@ -236,10 +264,11 @@ uint mmu_translate_l1(L1P inout ins_ret ins, uint addr, uint mode) {
+     uint tlb2_k = TLB2_IDX(mode, addr);
+     uint tlb2_ctx = priv | (sum << 2) | (mxr << 3);
+     uint l2_page = tlb2_pg[tlb2_k];
+-    bool l2_hit = tlb2_tag[tlb2_k] == TLB2_TAG(addr, tlb2_ctx);
++    bool l2_hit = TLB2_HIT(tlb2_k, TLB2_TAG(addr, tlb2_ctx));
+     if (!l2_hit && tlb2_saved(tlb2_k, TLB2_TAG(addr, tlb2_ctx), l2_page)) {
+         tlb2_tag[tlb2_k] = TLB2_TAG(addr, tlb2_ctx);
+         tlb2_pg[tlb2_k] = l2_page;
++        TLB2_OCC_SET(tlb2_k)
+         l2_hit = true;
+     }
+     if (l2_hit) {
+@@ -318,6 +347,7 @@ uint mmu_translate_l1(L1P inout ins_ret ins, uint addr, uint mode) {
+     else { set_idx_uint4(tlb_w_vpn, addr >> 12, tlb_slot); set_idx_uint4(tlb_w_page, pa & ~0xfff, tlb_slot); }
+     tlb2_tag[tlb2_k] = TLB2_TAG(addr, tlb2_ctx);
+     tlb2_pg[tlb2_k] = pa & ~0xfff;
++    TLB2_OCC_SET(tlb2_k)
+     if (super) {
+         tlbm_tag[tlbm_k] = TLBM_TAG(addr, tlb2_ctx);
+         tlbm_pg[tlbm_k] = pa & ~0x3fffff;

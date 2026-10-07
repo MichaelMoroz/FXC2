@@ -21,7 +21,9 @@ This repo packages that as:
 | `bin/vkd3d-compiler.exe` | Upstream vkd3d CLI (also does DXBC → SPIR-V/GLSL/MSL/asm). |
 | `tools/hlsl2dxbc.py` | Front-end chooser: `direct`, via Slang, via DXC + SPIRV-Cross, or `auto`. |
 | `bin/unity/` | The pair of DLLs Unity needs: a loader-proof stub named `D3DCompiler_47.dll` plus the real compiler as `fxc2_d3dcompiler.dll` (see Unity below). |
-| `patches/` | 29 patches on top of upstream vkd3d (see below). |
+| `patches/` | 42 patches on top of upstream vkd3d (see below); `tools/vkd3d-patch-scripts/` has the scripts they were made with. |
+| `tools/replay.py` | Recompiles sources the DLL captured (a Unity project's, say) with and without the optimisations and with FXC, and compares. |
+| `shaderemu/rvc_opt-fxc2.patch` | The changes to ShaderEmu's shader described under "The emulator shader". |
 | `scripts/unity-overlay.ps1` | Makes a junction-based copy of a Unity editor that compiles with fxc2, leaving the real install untouched. |
 | `tools/failsrc.py` | Shows the source lines behind errors in sources the DLL saved (call tracing, below). |
 | `tools/se_matrix.py` | Benchmarks ShaderEmu under FXC, DXC or fxc2 with any setting of the tuning switches. |
@@ -40,19 +42,49 @@ Use `-T` rather than `/T` from Git Bash (MSYS rewrites `/T` into a path).
 ## Tested on real projects
 
 **Unity 2022.3 (D3D11), VRCFluid project.** Run through an overlay editor
-(`scripts/unity-overlay.ps1`) with a shader cache built only by fxc2.
+(`scripts/unity-overlay.ps1`) with a shader cache built only by fxc2. These are
+with the current build (all 42 patches):
 
-- All 154 passes of the project's 73 shaders compile: 425 `D3DCompile` calls,
+- All 153 passes of the project's shaders compile: 342 `D3DCompile` calls,
   0 failures.
 - The project's EditMode suite, which compares real shader output with an
   independent CPU reference: 443 of 444 pass, including all 276 `VRCFluidTests`.
   The stock compiler gives the same 443 of 444; the one failure
   (`GraphNodeTests.CheckHelpURLsForSystemNodes`) is a VRChat SDK test that fails
-  either way.
-- An edit-mode render of the scene differs from the stock-compiler render by at
-  most 3/255 per channel. In play mode the fluid simulates and renders (water
-  in the hot tub and on the slide, about 88 fps); that was judged by eye only,
-  no stock play-mode capture was taken to compare against.
+  either way. This suite is what caught the one wrong optimisation of this
+  round (see patch 41): five collider tests failed until it was removed, while
+  every test in `tests/` passed.
+- GPU time per frame in play mode (the fluid running; `FrameTimingManager`,
+  30 one-second averages from game time 30 s on, one run each, same session):
+
+  | shaders compiled by | GPU ms per frame, median (min to max) |
+  |---|---|
+  | FXC (stock editor) | 0.724 (0.668 to 0.789) |
+  | fxc2, optimisations off | 0.691 (0.615 to 0.813) |
+  | fxc2 | 0.633 (0.565 to 0.706) |
+
+  The ranges overlap and each is a single run, so read this as "not slower
+  than FXC, and the optimisations help", not as a 12% win.
+- An edit-mode render of the scene (taken with an earlier build) differs from
+  the stock-compiler render by at most 3/255 per channel.
+
+**The same project's shaders, offline.** With `%TEMP%\fxc2.dump.on` present the
+DLL saves every source it is given; `tools/replay.py` compiles those 342 again
+with fxc2, with fxc2's optimisations switched off, and with FXC, checks that
+D3D11 accepts each one and counts instructions:
+
+| | shaders | instructions | vs FXC, total | vs FXC, median |
+|---|---|---|---|---|
+| FXC | 342 | 56,582 | | |
+| fxc2, optimisations off | 342 | 121,428 | 2.15x | 2.08x |
+| fxc2 | 342 | 75,039 | 1.33x | 1.17x |
+
+The optimisations make 278 of the 342 smaller, leave 63 as they were and make
+one larger (a shader that picks one of several textures in a `switch`, which is
+lowered to an if chain; that lowering is worth 2 to 3% on ShaderEmu). Against
+FXC, 6 are smaller, 103 the same size and 233 larger. Instruction counts are
+not speed (see the next section), but they are what can be compared for 342
+shaders at once, and all of them load.
 
 **ShaderEmu** (a RISC-V machine in a pixel shader; `rvc_harness --d3d11` with
 `d3dcompiler_47.dll` placed next to the executable).
@@ -69,14 +101,11 @@ Use `-T` rather than `/T` from Git Bash (MSYS rewrites `/T` into a path).
 | 6000-frame bench: emulation speed | 1,595k IPS | 1,570k IPS |
 
 So the emulated machine behaves identically, the shader compiles about 70
-times faster, and it runs within 1 to 2% of FXC's build. Only the upstream
-`linux` image was booted; the project's own `linux-net` image and the
-GPU-device test images were not run.
-
-The Unity results above were taken before the code-generation work described
-under "Performance of the generated code"; the Unity suite has not been
-re-run with those patches. The 20 execution tests in `tests/` and the
-ShaderEmu runs here have.
+times faster, and the same source runs within 1 to 2% of FXC's build. (That
+table is from the first round of code-generation work, patches 14 to 29. With
+the shader changes fxc2 makes possible it is well ahead: see "The emulator
+shader".) Only the upstream `linux` image was booted then; `linux-net` and the
+raytracer were run for the later work.
 
 ## Performance of the generated code
 
@@ -121,10 +150,66 @@ changes the shape of control flow, or which values share a register, does.
 That matches the shader author's own notes (branches and merges after them
 dominate the per-pixel cost of this loop).
 
-Not done: `L1_LOCAL` passes a 1024-entry array through many functions as an
-`inout` parameter. vkd3d copies the array in and out at every call, which gives
-a 2 MB shader that does not run; inlining such parameters by reference would
-be needed to use that option.
+Later patches, measured the same way. None of them moves ShaderEmu's same-source
+number beyond noise (it stays at 98 to 99% of FXC's build); what they change is
+the size of ordinary shaders, as counted over the Unity project above:
+
+| change | switch | Unity shaders, instructions vs FXC |
+|---|---|---|
+| (before) | | 1.62x |
+| dead code found from the outputs back, `dot(x, 0)` folded (33) | `VKD3D_HLSL_ADCE=0`, `VKD3D_HLSL_SPLIT_RANGES=0` | 1.49x |
+| results computed into their destination, variables and swizzles read in place, `add_sat` and friends (34, 36, 37) | `VKD3D_FORWARD_STORES=0` | 1.35x |
+| `if_z`, `breakc`, `continuec` (35) | (same switch) | 1.33x |
+| `inout` arrays worked on in place (38) | `VKD3D_HLSL_ALIAS_ARRAYS=0` | no change here; see below |
+
+The first of those is what a keyword-heavy surface shader needs: one of this
+project's went from 1,149 instructions to 134 (FXC: 119), because a light loop
+whose result is multiplied by a zeroed-out light is now removed.
+
+### The emulator shader
+
+With compiles taking 9 seconds instead of 9 minutes the shader itself can be
+tuned on D3D11, and two things in it only fxc2 can compile.
+`shaderemu/rvc_opt-fxc2.patch` is the change to ShaderEmu's
+`experiments/rvc_opt` (apply with `git apply`); under FXC the patched shader
+builds and behaves as before.
+
+- **`inout` arrays by reference (patch 38).** The shader's `L1_LOCAL` option
+  makes its 1024-entry write cache a local array handed down through a dozen
+  functions, so that it is not zeroed at the start of every pass. FXC cannot
+  compile that at all (`error X3531: can't unroll loops marked with loop
+  attribute`), and vkd3d copied the array in and out at every call: a 2 MB
+  shader that did not run. Now such an array is the caller's own wherever that
+  cannot be told from a copy. The shader patch does the same for the two
+  768-entry TLB arrays and switches both on when `__FXC2__` is defined.
+- **`mulhi()`, `umulExtended()`, `imulExtended()` (patch 42).** The `umul` and
+  `imul` instructions return both halves of a 32 x 32 bit product; HLSL can
+  only ask for the low one. `umulExtended(a, b, hi, lo)` is one `umul` with
+  both destinations, `mulhi(a, b)` the high half alone (signed for `int`). The
+  emulator's MULH was four multiplications and a carry chain.
+- `sfence.vma` with an address flushes that page's TLB entries instead of all
+  of them (plain HLSL, works under FXC too): 60% fewer page walks over a boot.
+
+| ShaderEmu on D3D11, same machine and session | FXC | fxc2 |
+|---|---|---|
+| `CPUTick` compile time | 554 s | 9.3 s |
+| 6000-frame bench, 2,048 instructions a frame | 1,528k IPS | 1,970k IPS |
+| fixed cost per frame | 0.714 ms | 0.382 ms |
+| 1500 frames at 16,384 instructions a frame | 2,604k IPS | 2,810k IPS |
+| Linux cold boot, 21,000 frames | 30.2 s | 22.6 s |
+| state hashes; boot instruction count (41,545,138) and console output | | identical |
+
+The gain is nearly all fixed cost: zeroing the three arrays was 0.4 ms of every
+pass. Per emulated instruction the two builds are about equal (the split that
+`se_matrix.py` prints, 304 against 321 ns, overstates fxc2's share: at 16,384
+instructions a frame the whole difference is the fixed part and a little more).
+The raytracer guest (73,669,730 instructions, machine mode, where MULH matters)
+ran at 4.18M IPS with `mulhi()` and at 3.96M and 4.13M in two runs without, with
+the same final state: a gain of a few percent at most.
+
+The machine these were taken on drifted by up to 8% between sessions (FXC's
+bench figure was 1,595k on one day and 1,493k to 1,536k on another), so only
+numbers from one session are compared with each other.
 
 One difference from FXC found on the way: for a `switch` whose only label is
 `default`, FXC drops the body entirely (the test returned 0 where the source
@@ -135,10 +220,10 @@ adds 0.0625); vkd3d executes it. That is left as it is.
 Measured on this machine by `tests/run.py`, `tests/bench.py` and
 `tests/features.py`; FXC 10.0.26100 is the reference.
 
-**Correctness.** All 21 test shaders compile (19 directly, one each through
-the Slang and DXC routes). The 20 that target SM4+ are accepted by the D3D11
+**Correctness.** All 24 test shaders compile (22 directly, one each through
+the Slang and DXC routes). The 23 that target SM4+ are accepted by the D3D11
 runtime, on WARP and on the hardware GPU (`--gpu`); the SM3 one is only checked
-to compile, nothing loads it into D3D9. The 13 pixel shaders with
+to compile, nothing loads it into D3D9. The 17 pixel shaders with
 a render check produce the same image as the FXC build (max channel difference
 1.2e-4 on the GPU, float rounding), and the compute shader leaves bit-identical
 buffer contents.
@@ -252,6 +337,39 @@ flattening of branches that touch arrays (23), an optional round-robin
 register allocator (25) and budgeted loop unrolling, which replaces patch 1's
 blanket "never unroll" and fixes implicit limits silently truncating loops
 (27).
+
+Patches 30 to 42:
+
+30. `mul(matrix, vector)` with one instruction per register instead of two per
+    element (`VKD3D_HLSL_SCALAR_MUL` restores the old code).
+31. `a * b + c` as `mad` unless IEEE strictness is asked for
+    (`VKD3D_HLSL_MAD=0`).
+32. `float4(1, 1, 1, x)` stores its constants as one vector; `mov r1, r1`
+    left by register allocation is dropped.
+33. **Dead code from the outputs back.** What is needed is what has an effect
+    (outputs, resource writes, discards) and whatever that uses, including the
+    control flow around it; the rest goes, whole loops included. A variable
+    assigned as a whole at the top level of the function counts as a new
+    variable from there on, so "fill in a structure, reset it, fill it in
+    again" does not keep the first lot. Also `dot(x, 0)` is 0.
+34. **Results go where they are going.** `dp3 r5.x, ...` / `mov r4.y, r5.x`
+    becomes `dp3 r4.y, ...`, and `mov_sat` after an instruction becomes that
+    instruction's `_sat`. Two thirds of the surplus `mov`s were of this kind.
+35. `not` + `if_nz` is `if_z`; `if` / `break` / `endif` is `breakc`.
+36. (and 37) The same for swizzles of values, for values that are stored and
+    used, and for copies of variables as far as the variable is unchanged.
+38. **`inout` arrays by reference**, and a fix for upstream's propagation of
+    `a[i]` to `b[c * i + d]`, which read `b` where `a` was loaded without
+    checking that `b` was still the same, and never terminated on two arrays
+    assigned to each other (every `inout` array argument).
+39. `__FXC2__` is predefined.
+40. Per-variable state of two passes is reset from the code, not from the
+    scope lists.
+41. **A fix for 33.** After removing dead code it put component stores together
+    early so that newly small branches would flatten well, with a pass that is
+    only correct where it normally runs. That moved stores across loads. No
+    test here saw it; five collider tests of the Unity project did.
+42. `mulhi()`, `umulExtended()`, `imulExtended()`.
 
 ## Approaches that do not work
 

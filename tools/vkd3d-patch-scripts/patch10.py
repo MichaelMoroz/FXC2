@@ -1,0 +1,48 @@
+import os
+path = os.path.expanduser("~/fxc2/vkd3d/libs/vkd3d-shader/hlsl_codegen.c")
+s = open(path).read()
+old = '''    if (type->class == HLSL_CLASS_VECTOR && idx->type != HLSL_IR_CONSTANT)
+    {
+        /* We should turn this into an hlsl_error after we implement unrolling, because if we get
+         * here after that, it means that the HLSL is invalid. */
+        hlsl_fixme(ctx, &instr->loc, "Non-constant vector addressing on store. Unrolling may be missing.");
+    }
+
+    return NULL;
+'''
+new = '''    if (type->class == HLSL_CLASS_VECTOR && idx->type != HLSL_IR_CONSTANT)
+    {
+        /* fxc2: FXC only accepts this once unrolling has made the index
+         * constant. Loops are not unrolled speculatively here, so write the
+         * whole vector instead, replacing the one component that matches:
+         * v = (idx == {0, 1, 2, 3}) ? rhs.xxxx : v. */
+        struct hlsl_ir_node *eq, *swizzle, *c, *vector_load, *rhs, *cond, *operands[HLSL_MAX_OPERANDS] = {0};
+        unsigned int width = type->e.numeric.dimx;
+        struct hlsl_constant_value value;
+
+        vector_load = hlsl_block_add_load_parent(ctx, block, deref, &instr->loc);
+        swizzle = hlsl_block_add_swizzle(ctx, block, HLSL_SWIZZLE(X, X, X, X), width, idx, &instr->loc);
+
+        value.u[0].u = 0;
+        value.u[1].u = 1;
+        value.u[2].u = 2;
+        value.u[3].u = 3;
+        c = hlsl_block_add_constant(ctx, block, hlsl_get_vector_type(ctx, HLSL_TYPE_UINT, width), &value, &instr->loc);
+
+        operands[0] = swizzle;
+        operands[1] = c;
+        eq = hlsl_block_add_expr(ctx, block, HLSL_OP2_EQUAL, operands,
+                hlsl_get_vector_type(ctx, HLSL_TYPE_BOOL, width), &instr->loc);
+
+        rhs = hlsl_block_add_swizzle(ctx, block, HLSL_SWIZZLE(X, X, X, X), width,
+                hlsl_ir_store(instr)->rhs.node, &instr->loc);
+        cond = hlsl_add_conditional(ctx, block, eq, rhs, vector_load);
+        hlsl_block_add_store_parent(ctx, block, deref, deref->path_len - 1, cond, 0, &instr->loc);
+        return cond;
+    }
+
+    return NULL;
+'''
+assert s.count(old) == 1
+open(path, "w").write(s.replace(old, new))
+print("patched")
