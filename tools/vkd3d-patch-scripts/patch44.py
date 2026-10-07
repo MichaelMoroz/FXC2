@@ -1,0 +1,530 @@
+import os
+base = os.path.expanduser("~/fxc2/vkd3d/libs/vkd3d-shader/")
+
+
+def edit(name, pairs):
+    path = base + name
+    s = open(path).read()
+    for old, new in pairs:
+        assert s.count(old) == 1, (name, old[:80], s.count(old))
+        s = s.replace(old, new)
+    open(path, "w").write(s)
+
+
+# --- SampleGrad on array textures: the gradients do not have the array index.
+# --- SV_InstanceID / SV_VertexID handed on to a geometry (or hull) shader are ordinary values there.
+edit("hlsl.y", [
+    ('''    load_params.ddx = add_implicit_conversion(ctx, block, params->args[2],
+            hlsl_get_vector_type(ctx, HLSL_TYPE_FLOAT, sampler_dim), loc);
+    load_params.ddy = add_implicit_conversion(ctx, block, params->args[3],
+            hlsl_get_vector_type(ctx, HLSL_TYPE_FLOAT, sampler_dim), loc);
+''', '''    /* fxc2: the gradients are of the texture's own dimensions; an array's
+     * coordinates have the element index on top of those. */
+    grad_dim = sampler_dim;
+    if (object_type->sampler_dim == HLSL_SAMPLER_DIM_1DARRAY || object_type->sampler_dim == HLSL_SAMPLER_DIM_2DARRAY
+            || object_type->sampler_dim == HLSL_SAMPLER_DIM_CUBEARRAY)
+        --grad_dim;
+    load_params.ddx = add_implicit_conversion(ctx, block, params->args[2],
+            hlsl_get_vector_type(ctx, HLSL_TYPE_FLOAT, grad_dim), loc);
+    load_params.ddy = add_implicit_conversion(ctx, block, params->args[3],
+            hlsl_get_vector_type(ctx, HLSL_TYPE_FLOAT, grad_dim), loc);
+'''),
+])
+path = base + "hlsl.y"
+s = open(path).read()
+i = s.index("static bool add_sample_grad_method_call")
+j = s.index("    unsigned int sampler_dim, offset_dim;", i)
+s = s[:j] + "    unsigned int sampler_dim, offset_dim, grad_dim;" + s[j + len("    unsigned int sampler_dim, offset_dim;"):]
+open(path, "w").write(s)
+
+edit("tpf.c", [
+    ('''        else if (has_sv_prefix)
+            return false;
+        else
+            *sysval_semantic = VKD3D_SHADER_SV_NONE;
+        return true;
+    }
+''', '''        /* fxc2: what the vertex shader passed on under these names is an
+         * ordinary value by now. */
+        else if (!ascii_strcasecmp(semantic_name, "sv_instanceid") || !ascii_strcasecmp(semantic_name, "sv_vertexid"))
+            *sysval_semantic = VKD3D_SHADER_SV_NONE;
+        else if (has_sv_prefix)
+            return false;
+        else
+            *sysval_semantic = VKD3D_SHADER_SV_NONE;
+        return true;
+    }
+'''),
+])
+
+# --- struct member functions
+edit("hlsl.h", [
+    ('''            struct hlsl_struct_field *fields;
+            size_t field_count;
+        } record;
+''', '''            struct hlsl_struct_field *fields;
+            size_t field_count;
+            /* fxc2: nonzero for a struct with member functions; they are
+             * the functions called "<serial>::<name>". */
+            unsigned int method_serial;
+        } record;
+'''),
+    ('''struct hlsl_ir_function_decl
+{
+    struct hlsl_type *return_type;
+''', '''struct hlsl_ir_function_decl
+{
+    /* fxc2: for a member function, the struct it belongs to (see
+     * hlsl_type.e.record.method_serial) and how many of the struct's fields
+     * it takes as its first, implicit, parameters. */
+    unsigned int method_serial, method_field_count;
+
+    struct hlsl_type *return_type;
+'''),
+    ('''    struct list scopes;
+''', '''    struct list scopes;
+
+    /* fxc2: the struct bodies being parsed, innermost last, for member
+     * functions: the fields declared so far become their parameters. */
+    struct hlsl_method_frame
+    {
+        struct hlsl_struct_field *fields;
+        size_t count;
+        unsigned int serial;
+        bool has_methods;
+    } method_frames[8];
+    unsigned int method_depth, method_serial_counter;
+'''),
+])
+
+path = base + "hlsl.c"
+s = open(path).read()
+i = s.index("struct hlsl_type *hlsl_type_clone(struct hlsl_ctx *ctx, struct hlsl_type *old,")
+old = "            type->e.record.field_count = field_count;\n"
+j = s.index(old, i)
+s = s[:j] + old + "            type->e.record.method_serial = old->e.record.method_serial;\n" + s[j + len(old):]
+open(path, "w").write(s)
+
+HELPERS = r'''/* fxc2: struct member functions.
+ *
+ *     struct Decal { float2 scale; float mode; void Init(float2 s) { scale = s * mode; } };
+ *     ...  decal.Init(x);
+ *
+ * A member function is compiled as an ordinary function that takes the
+ * fields declared before it as inout parameters of the same names, ahead of
+ * its own: "Init(inout float2 scale, inout float mode, float2 s)", and the
+ * call as "Init(decal.scale, decal.mode, x)". Inside the body a field is
+ * then simply a parameter, and what the function changes is copied back by
+ * the call like any out argument. The functions are named "<n>::<name>" with
+ * a number per struct, which no source can spell. A member function can call
+ * the ones declared before it. */
+static struct hlsl_method_frame *method_frame(struct hlsl_ctx *ctx)
+{
+    if (!ctx->method_depth || ctx->method_depth > ARRAY_SIZE(ctx->method_frames))
+        return NULL;
+    return &ctx->method_frames[ctx->method_depth - 1];
+}
+
+static char *method_function_name(struct hlsl_ctx *ctx, unsigned int serial, const char *name)
+{
+    size_t size = strlen(name) + 16;
+    char *ret;
+
+    if ((ret = hlsl_alloc(ctx, size)))
+        snprintf(ret, size, "%u::%s", serial, name);
+    return ret;
+}
+
+static bool scope_has_var(const struct hlsl_scope *scope, const char *name)
+{
+    const struct hlsl_ir_var *var;
+
+    LIST_FOR_EACH_ENTRY(var, &scope->vars, struct hlsl_ir_var, scope_entry)
+    {
+        if (var->name && !strcmp(var->name, name))
+            return true;
+    }
+    return false;
+}
+
+/* Puts the fields in front of the parameters the member function declares
+ * itself ("explicit", already in the scope). */
+static bool add_method_parameters(struct hlsl_ctx *ctx, struct hlsl_func_parameters *parameters,
+        const struct hlsl_func_parameters *explicit, const struct vkd3d_shader_location *loc)
+{
+    const struct hlsl_method_frame *frame = method_frame(ctx);
+    size_t i;
+
+    memset(parameters, 0, sizeof(*parameters));
+    if (frame)
+    {
+        for (i = 0; i < frame->count; ++i)
+        {
+            const struct hlsl_struct_field *field = &frame->fields[i];
+            const struct hlsl_type *element = hlsl_get_multiarray_element_type(field->type);
+            struct parse_parameter param = {0};
+
+            param.type = field->type;
+            /* A parameter of the same name hides the field; the place in the
+             * list is still needed. */
+            if (scope_has_var(ctx->cur_scope, field->name))
+                param.name = method_function_name(ctx, i, field->name);
+            else
+                param.name = hlsl_strdup(ctx, field->name);
+            if (!param.name)
+                return false;
+            param.modifiers = HLSL_STORAGE_IN;
+            if (hlsl_is_numeric_type(element) || element->class == HLSL_CLASS_STRUCT)
+                param.modifiers |= HLSL_STORAGE_OUT;
+            if (!add_func_parameter(ctx, parameters, &param, loc))
+                return false;
+        }
+    }
+    if (explicit)
+    {
+        if (!hlsl_array_reserve(ctx, (void **)&parameters->vars, &parameters->capacity,
+                parameters->count + explicit->count, sizeof(*parameters->vars)))
+            return false;
+        for (i = 0; i < explicit->count; ++i)
+            parameters->vars[parameters->count++] = explicit->vars[i];
+        vkd3d_free(explicit->vars);
+    }
+    return true;
+}
+
+static struct hlsl_ir_function_decl *method_first_overload(struct hlsl_ctx *ctx, const char *name)
+{
+    struct hlsl_ir_function *func;
+
+    if (!(func = hlsl_get_function(ctx, name)) || list_empty(&func->overloads))
+        return NULL;
+    return LIST_ENTRY(list_head(&func->overloads), struct hlsl_ir_function_decl, entry);
+}
+
+/* "object.name(args)" for a struct with member functions. */
+static bool add_struct_method_call(struct hlsl_ctx *ctx, struct hlsl_block *block, struct hlsl_ir_node *object,
+        const char *name, const struct parse_initializer *params, const struct vkd3d_shader_location *loc)
+{
+    const struct hlsl_type *type = object->data_type;
+    struct hlsl_ir_function_decl *decl, *first;
+    struct parse_initializer args = {0};
+    unsigned int i, count;
+    char *mangled;
+    bool ret;
+
+    if (!type->e.record.method_serial
+            || !(mangled = method_function_name(ctx, type->e.record.method_serial, name)))
+        return false;
+    if (!(first = method_first_overload(ctx, mangled)))
+    {
+        vkd3d_free(mangled);
+        return false;
+    }
+    count = min(first->method_field_count, type->e.record.field_count);
+
+    args.instrs = block;
+    args.args_count = count + params->args_count;
+    if (!(args.args = hlsl_calloc(ctx, max(args.args_count, 1), sizeof(*args.args))))
+    {
+        vkd3d_free(mangled);
+        return false;
+    }
+    for (i = 0; i < count; ++i)
+    {
+        add_record_access(ctx, block, object, i, loc);
+        args.args[i] = node_from_block(block);
+    }
+    for (i = 0; i < params->args_count; ++i)
+        args.args[count + i] = params->args[i];
+
+    if (!(decl = find_function_call(ctx, mangled, &args, false, loc)))
+    {
+        hlsl_error(ctx, loc, VKD3D_SHADER_ERROR_HLSL_NOT_DEFINED,
+                "No member function \"%s\" takes these %u arguments.", name, params->args_count);
+        ret = false;
+    }
+    else
+    {
+        ret = !!add_user_call(ctx, decl, &args, loc);
+    }
+    vkd3d_free(args.args);
+    vkd3d_free(mangled);
+    return ret;
+}
+
+/* "name(args)" inside a member function, for a member function declared
+ * before it: the fields are the caller's own first parameters. Returns the
+ * name to call and extends "args", or NULL when it is no such call. */
+static char *method_sibling_call(struct hlsl_ctx *ctx, const char *name, struct parse_initializer *args,
+        const struct vkd3d_shader_location *loc)
+{
+    struct hlsl_ir_function_decl *caller = ctx->cur_function, *first;
+    struct hlsl_ir_node **new_args;
+    unsigned int i, count;
+    char *mangled;
+
+    if (!ctx->method_depth || !caller || !caller->method_serial || hlsl_get_function(ctx, name)
+            || !(mangled = method_function_name(ctx, caller->method_serial, name)))
+        return NULL;
+    if (!(first = method_first_overload(ctx, mangled))
+            || (count = first->method_field_count) > caller->method_field_count
+            || !(new_args = hlsl_calloc(ctx, count + args->args_count + 1, sizeof(*new_args))))
+    {
+        vkd3d_free(mangled);
+        return NULL;
+    }
+    for (i = 0; i < count; ++i)
+        new_args[i] = hlsl_block_add_simple_load(ctx, args->instrs, caller->parameters.vars[i], loc);
+    for (i = 0; i < args->args_count; ++i)
+        new_args[count + i] = args->args[i];
+    vkd3d_free(args->args);
+    args->args = new_args;
+    args->args_count += count;
+    return mangled;
+}
+
+'''
+
+path = base + "hlsl.y"
+s = open(path).read()
+
+
+def rep(old, new, count=1):
+    global s
+    assert s.count(old) == count, (old[:80], s.count(old))
+    s = s.replace(old, new)
+
+
+# helpers go before add_call(), which uses the last one; the others are used by the grammar
+anchor = '''static struct hlsl_block *add_call(struct hlsl_ctx *ctx, const char *name,
+        struct parse_initializer *args, const struct vkd3d_shader_location *loc)
+{
+    const struct intrinsic_function *intrinsic;
+    struct hlsl_ir_function_decl *decl;
+'''
+rep(anchor, HELPERS + '''static struct hlsl_block *add_call(struct hlsl_ctx *ctx, const char *name,
+        struct parse_initializer *args, const struct vkd3d_shader_location *loc)
+{
+    const struct intrinsic_function *intrinsic;
+    struct hlsl_ir_function_decl *decl;
+    char *method_name;
+
+    /* fxc2 */
+    if ((method_name = method_sibling_call(ctx, name, args, loc)))
+    {
+        if (!(decl = find_function_call(ctx, method_name, args, false, loc)))
+            hlsl_error(ctx, loc, VKD3D_SHADER_ERROR_HLSL_NOT_DEFINED,
+                    "No member function \\"%s\\" takes these arguments.", name);
+        vkd3d_free(method_name);
+        if (!decl || !add_user_call(ctx, decl, args, loc))
+            goto fail;
+        vkd3d_free(args->args);
+        return args->instrs;
+    }
+''')
+
+# the struct body
+rep('''fields_list:
+      %empty
+        {
+            $$.fields = NULL;
+            $$.count = 0;
+            $$.capacity = 0;
+        }
+''', '''fields_list:
+      %empty
+        {
+            $$.fields = NULL;
+            $$.count = 0;
+            $$.capacity = 0;
+
+            /* fxc2 */
+            if (ctx->method_depth++ < ARRAY_SIZE(ctx->method_frames))
+            {
+                struct hlsl_method_frame *frame = method_frame(ctx);
+
+                memset(frame, 0, sizeof(*frame));
+                frame->serial = ++ctx->method_serial_counter;
+            }
+        }
+    | fields_list func_declaration
+        {
+            struct hlsl_method_frame *frame;
+
+            /* fxc2: a member function */
+            if ((frame = method_frame(ctx)))
+                frame->has_methods = true;
+            $$ = $1;
+        }
+    | fields_list func_declaration ';'
+        {
+            struct hlsl_method_frame *frame;
+
+            if ((frame = method_frame(ctx)))
+                frame->has_methods = true;
+            $$ = $1;
+        }
+''')
+rep('''            $1.count += $2.count;
+            vkd3d_free($2.fields);
+
+            $$ = $1;
+        }
+''', '''            $1.count += $2.count;
+            vkd3d_free($2.fields);
+
+            $$ = $1;
+
+            /* fxc2 */
+            if (method_frame(ctx))
+            {
+                method_frame(ctx)->fields = $$.fields;
+                method_frame(ctx)->count = $$.count;
+            }
+        }
+''')
+
+# "field_type" has to go: with member functions the parser must not decide
+# between a field and a function before it has seen the name.
+i = s.index("field:\n      var_modifiers field_type variables_def ';'\n")
+j = s.index("\nattribute:\n", i)
+field_rule = s[i:j]
+action = field_rule[field_rule.index("        {"):]
+new_rule = ("field:\n      var_modifiers type variables_def ';'\n" + action.rstrip("\n")
+        + "\n    | var_modifiers unnamed_struct_spec variables_def ';'\n" + action.rstrip("\n") + "\n")
+s = s[:i] + new_rule + s[j:]
+rep('''field_type:
+      type
+    | unnamed_struct_spec
+
+''', '')
+rep('''%type <type> field_type
+''', '')
+
+CLOSE = '''
+            /* fxc2 */
+            if (ctx->method_depth)
+            {
+                const struct hlsl_method_frame *frame = method_frame(ctx);
+
+                if (frame && frame->has_methods && $$)
+                    $$->e.record.method_serial = frame->serial;
+                --ctx->method_depth;
+            }
+'''
+rep('''            $$ = hlsl_new_struct_type(ctx, $2, $5.fields, $5.count);
+''', '''            $$ = hlsl_new_struct_type(ctx, $2, $5.fields, $5.count);
+''' + CLOSE)
+rep('''            $$ = hlsl_new_struct_type(ctx, NULL, $3.fields, $3.count);
+''', '''            $$ = hlsl_new_struct_type(ctx, NULL, $3.fields, $3.count);
+''' + CLOSE)
+
+# parameters of a member function
+rep('''parameters:
+      scope_start
+        {
+            memset(&$$, 0, sizeof($$));
+        }
+    | scope_start KW_VOID
+        {
+            memset(&$$, 0, sizeof($$));
+        }
+    | scope_start param_list
+        {
+            $$ = $2;
+        }
+''', '''parameters:
+      scope_start
+        {
+            if (!add_method_parameters(ctx, &$$, NULL, &@$))
+                YYABORT;
+        }
+    | scope_start KW_VOID
+        {
+            if (!add_method_parameters(ctx, &$$, NULL, &@$))
+                YYABORT;
+        }
+    | scope_start param_list
+        {
+            if (!method_frame(ctx))
+                $$ = $2;
+            else if (!add_method_parameters(ctx, &$$, &$2, &@$))
+                YYABORT;
+        }
+''')
+
+rep('''            /* Functions are unconditionally inlined. */
+            modifiers &= ~HLSL_MODIFIER_INLINE;
+
+            if (modifiers & ~(HLSL_MODIFIERS_MAJORITY_MASK | HLSL_STORAGE_EXPORT | HLSL_STORAGE_STATIC))
+''', '''            /* Functions are unconditionally inlined. */
+            modifiers &= ~HLSL_MODIFIER_INLINE;
+
+            /* fxc2: a member function */
+            if (method_frame(ctx))
+            {
+                char *mangled;
+
+                if (!(mangled = method_function_name(ctx, method_frame(ctx)->serial, $3)))
+                    YYABORT;
+                vkd3d_free($3);
+                $3 = mangled;
+            }
+
+            if (modifiers & ~(HLSL_MODIFIERS_MAJORITY_MASK | HLSL_STORAGE_EXPORT | HLSL_STORAGE_STATIC))
+''')
+rep('''            ctx->cur_function = $$.decl;
+        }
+''', '''            if (method_frame(ctx))
+            {
+                $$.decl->method_serial = method_frame(ctx)->serial;
+                $$.decl->method_field_count = method_frame(ctx)->count;
+            }
+
+            ctx->cur_function = $$.decl;
+        }
+''')
+
+rep('''            hlsl_block_add_block($1, $5.instrs);
+            vkd3d_free($5.instrs);
+
+            if (!add_method_call(ctx, $1, object, $3, &$5, &@3))
+''', '''            hlsl_block_add_block($1, $5.instrs);
+            vkd3d_free($5.instrs);
+
+            /* fxc2 */
+            if (object->data_type->class == HLSL_CLASS_STRUCT && object->data_type->e.record.method_serial)
+            {
+                if (!add_struct_method_call(ctx, $1, object, $3, &$5, &@3))
+                {
+                    destroy_block($1);
+                    vkd3d_free($3);
+                    vkd3d_free($5.args);
+                    YYABORT;
+                }
+            }
+            else
+            if (!add_method_call(ctx, $1, object, $3, &$5, &@3))
+''')
+open(path, "w").write(s)
+print("patched")
+
+# The helper functions some intrinsics are made of are parsed in the middle of
+# whatever is being parsed; that is not part of a struct body.
+edit("hlsl.c", [
+    ('''    ctx->cur_function = NULL;
+    ret = hlsl_lexer_compile(ctx, &code);
+    ctx->scanner = saved_scanner;
+''', '''    ctx->cur_function = NULL;
+    saved_method_depth = ctx->method_depth;
+    ctx->method_depth = 0;
+    ret = hlsl_lexer_compile(ctx, &code);
+    ctx->method_depth = saved_method_depth;
+    ctx->scanner = saved_scanner;
+'''),
+    ('''    void *saved_scanner = ctx->scanner;
+''', '''    void *saved_scanner = ctx->scanner;
+    unsigned int saved_method_depth;
+'''),
+])
+print("patched 2")

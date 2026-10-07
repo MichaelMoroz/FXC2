@@ -1,0 +1,65 @@
+From e984a7e5fc3987cd24f23abbea991998e71a5fa1 Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Wed, 7 Oct 2026 22:18:12 +0200
+Subject: [PATCH 45/45] vkd3d-shader/hlsl: Compile time on very large shaders.
+
+---
+ libs/vkd3d-shader/hlsl_codegen.c | 17 ++++++++++++-----
+ 1 file changed, 12 insertions(+), 5 deletions(-)
+
+diff --git a/libs/vkd3d-shader/hlsl_codegen.c b/libs/vkd3d-shader/hlsl_codegen.c
+index bd34d41a..36a694da 100644
+--- a/libs/vkd3d-shader/hlsl_codegen.c
++++ b/libs/vkd3d-shader/hlsl_codegen.c
+@@ -4122,7 +4122,11 @@ static void record_vectorizable_expr(struct hlsl_ctx *ctx, struct hlsl_block *bl
+             return;
+     }
+ 
+-    for (size_t i = 0; i < state->count; ++i)
++    /* fxc2: every expression was compared with every group found so far,
++     * which is half the compile time of a very large shader. What can go
++     * into one vector instruction is computed close together; look at the
++     * most recent groups only. */
++    for (size_t i = state->count > 256 ? state->count - 256 : 0; i < state->count; ++i)
+     {
+         struct vectorizable_exprs_group *group = &state->groups[i];
+         struct hlsl_ir_expr *other = group->exprs[0];
+@@ -5305,10 +5309,15 @@ static bool deref_has_dynamic_index(const struct hlsl_deref *deref)
+ 
+ static bool is_conditional_block_simple(const struct hlsl_block *cond_block)
+ {
++    /* fxc2: read the environment once, not for every load and store. */
++    static int keep_array_branches = -1;
+     const unsigned int max_cost = flatten_max_cost();
+     struct hlsl_ir_node *instr;
+     unsigned int cost = 0;
+ 
++    if (keep_array_branches < 0)
++        keep_array_branches = hlsl_tuning_enabled("VKD3D_HLSL_KEEP_ARRAY_BRANCHES", true);
++
+     if (!max_cost)
+         return false;
+ 
+@@ -5341,8 +5350,7 @@ static bool is_conditional_block_simple(const struct hlsl_block *cond_block)
+                 /* fxc2: flattening "if (c) a[i] = x;" makes it an
+                  * unconditional read, select and write of memory, which is
+                  * far more expensive than the branch it replaces. */
+-                if (deref_has_dynamic_index(&hlsl_ir_store(instr)->lhs)
+-                        && hlsl_tuning_enabled("VKD3D_HLSL_KEEP_ARRAY_BRANCHES", true))
++                if (keep_array_branches && deref_has_dynamic_index(&hlsl_ir_store(instr)->lhs))
+                     return false;
+                 ++cost;
+                 break;
+@@ -5350,8 +5358,7 @@ static bool is_conditional_block_simple(const struct hlsl_block *cond_block)
+             case HLSL_IR_LOAD:
+                 if (hlsl_ir_load(instr)->src.var->is_tgsm)
+                     return false;
+-                if (deref_has_dynamic_index(&hlsl_ir_load(instr)->src)
+-                        && hlsl_tuning_enabled("VKD3D_HLSL_KEEP_ARRAY_BRANCHES", true))
++                if (keep_array_branches && deref_has_dynamic_index(&hlsl_ir_load(instr)->src))
+                     return false;
+                 break;
+ 
+-- 
+2.53.0
+

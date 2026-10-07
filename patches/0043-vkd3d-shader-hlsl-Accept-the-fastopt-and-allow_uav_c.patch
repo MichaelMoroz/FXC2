@@ -1,0 +1,29 @@
+From ea90c86a3be8cfdbd5bebcb39ce1b5a063be6c5b Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Wed, 7 Oct 2026 21:10:20 +0200
+Subject: [PATCH 43/45] vkd3d-shader/hlsl: Accept the fastopt and
+ allow_uav_condition loop attributes.
+
+---
+ libs/vkd3d-shader/hlsl.y | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/libs/vkd3d-shader/hlsl.y b/libs/vkd3d-shader/hlsl.y
+index 5076dc73..2a6b9501 100644
+--- a/libs/vkd3d-shader/hlsl.y
++++ b/libs/vkd3d-shader/hlsl.y
+@@ -766,7 +766,10 @@ static struct hlsl_block *create_loop(struct hlsl_ctx *ctx, enum hlsl_loop_type
+         else if (!strcmp(attr->name, "fastopt")
+                 || !strcmp(attr->name, "allow_uav_condition"))
+         {
+-            hlsl_fixme(ctx, loc, "Unhandled attribute '%s'.", attr->name);
++            /* fxc2: both only tell FXC's optimiser what it may do or skip
++             * ([fastopt]: do not spend time on this loop; the other allows a
++             * loop condition that depends on a UAV read). Nothing here needs
++             * telling. Poiyomi's shaders use [fastopt]. */
+         }
+         else
+         {
+-- 
+2.53.0
+

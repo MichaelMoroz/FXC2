@@ -21,7 +21,7 @@ This repo packages that as:
 | `bin/vkd3d-compiler.exe` | Upstream vkd3d CLI (also does DXBC → SPIR-V/GLSL/MSL/asm). |
 | `tools/hlsl2dxbc.py` | Front-end chooser: `direct`, via Slang, via DXC + SPIRV-Cross, or `auto`. |
 | `bin/unity/` | The pair of DLLs Unity needs: a loader-proof stub named `D3DCompiler_47.dll` plus the real compiler as `fxc2_d3dcompiler.dll` (see Unity below). |
-| `patches/` | 42 patches on top of upstream vkd3d (see below); `tools/vkd3d-patch-scripts/` has the scripts they were made with. |
+| `patches/` | 45 patches on top of upstream vkd3d (see below); `tools/vkd3d-patch-scripts/` has the scripts they were made with. |
 | `tools/replay.py` | Recompiles sources the DLL captured (a Unity project's, say) with and without the optimisations and with FXC, and compares. |
 | `shaderemu/rvc_opt-fxc2.patch` | The changes to ShaderEmu's shader described under "The emulator shader". |
 | `scripts/unity-overlay.ps1` | Makes a junction-based copy of a Unity editor that compiles with fxc2, leaving the real install untouched. |
@@ -43,7 +43,7 @@ Use `-T` rather than `/T` from Git Bash (MSYS rewrites `/T` into a path).
 
 **Unity 2022.3 (D3D11), VRCFluid project.** Run through an overlay editor
 (`scripts/unity-overlay.ps1`) with a shader cache built only by fxc2. These are
-with the current build (all 42 patches):
+with patches 1 to 42 (the Poiyomi run below is with all 45):
 
 - All 153 passes of the project's shaders compile: 342 `D3DCompile` calls,
   0 failures.
@@ -85,6 +85,35 @@ lowered to an if chain; that lowering is worth 2 to 3% on ShaderEmu). Against
 FXC, 6 are smaller, 103 the same size and 233 larger. Instruction counts are
 not speed (see the next section), but they are what can be compared for 342
 shaders at once, and all of them load.
+
+**Poiyomi Toon 10.0.24** (the seven built-in-pipeline shaders, 3.3 to 7 MB of source each),
+dropped into the same Unity project, in an editor that compiles with fxc2 and in the stock one.
+
+- As shipped (default material): all 44 passes compile, 0 failures.
+- With every keyword of each shader enabled and every `*Enable*` property set to 1 (a
+  combination no avatar uses, chosen to reach as much of the source as possible): all variants
+  compile, 0 failures of 222 compiles. The first attempt had 42 failures, all of which FXC
+  compiles, from three gaps that are now closed (patch 44): struct member functions (the decal
+  code), `SampleGrad` on a texture array, and `SV_InstanceID` as a geometry shader input.
+- Those 42 variants, recompiled offline: D3D11 accepts all of them; 519,949 instructions
+  against FXC's 357,913 (1.45x).
+- A lit sphere and cube rendered with each shader in both configurations, fxc2 against FXC:
+as shipped (plus a test texture and a tinted, dimmed light, so that the picture is not flat)
+  all seven pictures are identical to the last bit. With everything enabled both compilers give
+  the same saturated white objects, with silhouettes that differ in about 2% of the pixels;
+  rendering twice with the *same* compiler a minute apart differs by more (3%), because that
+  configuration switches on time-driven vertex effects. So that picture shows that the shaders
+  run, not that they agree.
+- Compile time, one all-features pixel shader variant (about 14,000 instructions out) and one
+  as-shipped one, outside Unity: fxc2 12.4 s and 3.9 s; FXC 52.6 s and 14.2 s. But Poiyomi's
+  shaders carry `#pragma skip_optimizations d3d11` until they are locked, and FXC without its
+  optimiser takes 4.9 s and 2.4 s (and emits half as much code again). fxc2 has no such mode:
+  it always optimises. So in the editor, on unlocked Poiyomi materials, the stock compiler is
+  the faster one, by 2 to 4 times (rendering all fourteen configurations cold took 891 s
+  against 233 s); where FXC optimises, fxc2 is about 4 times faster.
+- Member functions are compiled as functions that take every field of the struct as an `inout`
+  parameter, and Poiyomi's decal struct has about 70; that is where much of fxc2's time on the
+  all-features variants goes.
 
 **ShaderEmu** (a RISC-V machine in a pixel shader; `rvc_harness --d3d11` with
 `d3dcompiler_47.dll` placed next to the executable).
@@ -255,7 +284,7 @@ shaders are dominated by fixed per-draw overhead, so read this as "no large
 regression seen", not as a precise measurement.
 
 **HLSL coverage** (82 feature probes, full table in
-[docs/features.md](docs/features.md)): direct 70, via Slang 64, via DXC 63, at
+[docs/features.md](docs/features.md)): direct 71, via Slang 64, via DXC 63, at
 least one route 75.
 
 ## The routes
@@ -282,7 +311,7 @@ HLSL, so anything the vkd3d back end cannot express fails on every route.
 shader input. Doubles are scalar only, with `+ - * /`, negation and
 conversions; double vectors and comparisons are reported as unimplemented.
 
-Direct-only gaps that a front end fixes: struct member functions, namespaces,
+Direct-only gaps that a front end fixes: namespaces,
 interfaces/classes, templates, operator overloading.
 
 ## Patches carried on vkd3d
@@ -370,6 +399,19 @@ Patches 30 to 42:
     only correct where it normally runs. That moved stores across loads. No
     test here saw it; five collider tests of the Unity project did.
 42. `mulhi()`, `umulExtended()`, `imulExtended()`.
+43. The `[fastopt]` and `[allow_uav_condition]` loop attributes are accepted (they only steer
+    FXC's optimiser).
+44. **Struct member functions.** `struct S { float2 scale; void Init(float2 s) { scale = s; } };`
+    and `obj.Init(x)`: the function is compiled as an ordinary one that takes the fields
+    declared before it as `inout` parameters ahead of its own, so a field is simply a parameter
+    inside it and the call copies back what it changed. Overloads, members calling earlier
+    members and parameters that hide a field work; a field declared after the function is not
+    visible in it, and there is no `this`. Also `SampleGrad` on array textures (the gradients do
+    not include the array index) and `SV_InstanceID`/`SV_VertexID` as geometry and hull shader
+    inputs.
+45. Compile time on very large shaders: the search for expressions to put in one vector
+    instruction compared each with every group found so far, and one flattening check read the
+    environment for every load and store. Together a third of the time on a Poiyomi variant.
 
 ## Approaches that do not work
 

@@ -1,7 +1,7 @@
 From f6025c5c71935851ebde9a2b10b1fe378791f394 Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 07:40:47 +0200
-Subject: [PATCH 15/42] vkd3d-shader/hlsl: Turn multiplication and unsigned
+Subject: [PATCH 15/45] vkd3d-shader/hlsl: Turn multiplication and unsigned
  division by powers of two into shifts.
 
 ---

@@ -1,7 +1,7 @@
 From fcf0a9a1a1a2b0944f5ea57ec75ea6d1d0cbeafe Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 19:46:40 +0200
-Subject: [PATCH 39/42] vkd3d-shader/preproc: Predefine __FXC2__.
+Subject: [PATCH 39/45] vkd3d-shader/preproc: Predefine __FXC2__.
 
 ---
  libs/vkd3d-shader/preproc.l | 16 ++++++++++++++++

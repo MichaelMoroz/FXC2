@@ -41,3 +41,6 @@ vkd3d-2.1-93-gcfcb4833
 0040-vkd3d-shader-hlsl-Reset-per-variable-pass-state-from.patch
 0041-vkd3d-shader-hlsl-Do-not-vectorise-stores-early-afte.patch
 0042-vkd3d-shader-hlsl-Add-mulhi-umulExtended-and-imulExt.patch
+0043-vkd3d-shader-hlsl-Accept-the-fastopt-and-allow_uav_c.patch
+0044-vkd3d-shader-hlsl-Struct-member-functions-SampleGrad.patch
+0045-vkd3d-shader-hlsl-Compile-time-on-very-large-shaders.patch

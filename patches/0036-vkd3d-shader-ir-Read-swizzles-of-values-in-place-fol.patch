@@ -1,7 +1,7 @@
 From 2b02d61483cd689ae180b77ebca9c1e96a5bb35c Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 18:51:45 +0200
-Subject: [PATCH 36/42] vkd3d-shader/ir: Read swizzles of values in place, fold
+Subject: [PATCH 36/45] vkd3d-shader/ir: Read swizzles of values in place, fold
  not of a variable into the test.
 
 ---
