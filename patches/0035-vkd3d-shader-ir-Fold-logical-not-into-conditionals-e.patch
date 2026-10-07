@@ -1,0 +1,125 @@
+From babff852e4cb302c2ca1aa1d7d6dc14d335195be Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Wed, 7 Oct 2026 17:08:10 +0200
+Subject: [PATCH 35/35] vkd3d-shader/ir: Fold logical not into conditionals,
+ emit conditional break and continue.
+
+---
+ libs/vkd3d-shader/ir.c  | 78 +++++++++++++++++++++++++++++++++++++++++
+ libs/vkd3d-shader/tpf.c |  2 ++
+ 2 files changed, 80 insertions(+)
+
+diff --git a/libs/vkd3d-shader/ir.c b/libs/vkd3d-shader/ir.c
+index 4ecaa843..1abc5a72 100644
+--- a/libs/vkd3d-shader/ir.c
++++ b/libs/vkd3d-shader/ir.c
+@@ -13027,6 +13027,82 @@ static bool forward_source(struct vsir_instruction **list, unsigned int count, u
+     return true;
+ }
+ 
++static bool vsir_opcode_is_conditional(enum vsir_opcode opcode)
++{
++    return opcode == VSIR_OP_IF || opcode == VSIR_OP_BREAKP || opcode == VSIR_OP_CONTINUEP
++            || opcode == VSIR_OP_DISCARD;
++}
++
++static unsigned int forward_skip_nops(struct vsir_instruction **list, unsigned int count, unsigned int index)
++{
++    while (index < count && list[index]->opcode == VSIR_OP_NOP)
++        ++index;
++    return index;
++}
++
++/* fxc2: the conditional instructions of shader model 4 test for zero as
++ * readily as for nonzero, and a break or continue can carry its own
++ * condition:
++ *
++ *     not sr2.x, sr1.x        if_nz sr1.x
++ *     if_nz sr2.x                 break
++ *                             endif
++ *
++ * become "if_z sr1.x" and "breakc_nz sr1.x". */
++static void vsir_program_fold_conditionals(struct vsir_program *program, struct vsir_instruction **list,
++        unsigned int count, const struct forward_ssa *ssa)
++{
++    if (program->shader_version.major < 4)
++        return;
++
++    for (unsigned int i = 0; i < count; ++i)
++    {
++        struct vsir_instruction *ins = list[i], *def;
++        struct vsir_src_operand *src;
++        unsigned int jump, end;
++
++        if (!vsir_opcode_is_conditional(ins->opcode) || ins->src_count != 1)
++            continue;
++        src = &ins->src[0];
++
++        /* A logical not is emitted as a bitwise one, booleans being 0 or ~0. */
++        if (src->reg.type == VSIR_REGISTER_SSA && !src->modifiers
++                && (def = ssa[src->reg.idx[0].offset].def) && def->opcode == VSIR_OP_NOT
++                && ssa[src->reg.idx[0].offset].use_count == 1
++                && def->dst[0].reg.type == VSIR_REGISTER_SSA
++                && def->dst[0].reg.idx[0].offset == src->reg.idx[0].offset && !def->dst[0].modifiers
++                && def->src[0].reg.type == VSIR_REGISTER_SSA && !def->src[0].modifiers
++                && (def->dst[0].write_mask & (1u << vsir_swizzle_get_component(src->swizzle, 0))))
++        {
++            unsigned int component = vsir_swizzle_get_component(def->src[0].swizzle,
++                    vsir_swizzle_get_component(src->swizzle, 0));
++            enum vsir_data_type data_type = src->reg.data_type;
++            uint32_t swizzle = 0;
++
++            for (unsigned int j = 0; j < VKD3D_VEC4_SIZE; ++j)
++                vsir_swizzle_set_component(&swizzle, j, component);
++            src->reg = def->src[0].reg;
++            src->reg.data_type = data_type;
++            src->swizzle = swizzle;
++            ins->flags = ins->flags == VKD3D_SHADER_CONDITIONAL_OP_NZ
++                    ? VKD3D_SHADER_CONDITIONAL_OP_Z : VKD3D_SHADER_CONDITIONAL_OP_NZ;
++            vsir_instruction_make_nop(def);
++        }
++
++        if (ins->opcode != VSIR_OP_IF)
++            continue;
++        jump = forward_skip_nops(list, count, i + 1);
++        if (jump >= count || (list[jump]->opcode != VSIR_OP_BREAK && list[jump]->opcode != VSIR_OP_CONTINUE))
++            continue;
++        end = forward_skip_nops(list, count, jump + 1);
++        if (end >= count || list[end]->opcode != VSIR_OP_ENDIF)
++            continue;
++        ins->opcode = list[jump]->opcode == VSIR_OP_BREAK ? VSIR_OP_BREAKP : VSIR_OP_CONTINUEP;
++        vsir_instruction_make_nop(list[jump]);
++        vsir_instruction_make_nop(list[end]);
++    }
++}
++
+ static enum vkd3d_result vsir_program_forward_destinations(struct vsir_program *program)
+ {
+     struct vsir_program_iterator it = vsir_program_iterator(&program->instructions);
+@@ -13128,6 +13204,8 @@ static enum vkd3d_result vsir_program_forward_destinations(struct vsir_program *
+         }
+     }
+ 
++    vsir_program_fold_conditionals(program, list, count, ssa);
++
+     vkd3d_free(ssa);
+     vkd3d_free(list);
+     return VKD3D_OK;
+diff --git a/libs/vkd3d-shader/tpf.c b/libs/vkd3d-shader/tpf.c
+index 542dcd64..15f90628 100644
+--- a/libs/vkd3d-shader/tpf.c
++++ b/libs/vkd3d-shader/tpf.c
+@@ -4333,8 +4333,10 @@ static void tpf_handle_instruction(struct tpf_compiler *tpf, const struct vsir_i
+         case VSIR_OP_ATOMIC_XOR:
+         case VSIR_OP_AND:
+         case VSIR_OP_BREAK:
++        case VSIR_OP_BREAKP:
+         case VSIR_OP_CASE:
+         case VSIR_OP_CONTINUE:
++        case VSIR_OP_CONTINUEP:
+         case VSIR_OP_COUNTBITS:
+         case VSIR_OP_CUT:
+         case VSIR_OP_CUT_STREAM:
+-- 
+2.53.0
+

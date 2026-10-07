@@ -1,7 +1,7 @@
 From 7045e866d7dbcba772870c85b422c02e4f2ae368 Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 07:09:54 +0200
-Subject: [PATCH 10/34] vkd3d-shader/hlsl: Lower stores to a vector component
+Subject: [PATCH 10/35] vkd3d-shader/hlsl: Lower stores to a vector component
  selected at run time.
 
 ---

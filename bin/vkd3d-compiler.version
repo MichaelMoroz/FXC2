@@ -33,3 +33,4 @@ vkd3d-2.1-93-gcfcb4833
 0032-vkd3d-shader-Store-different-constants-as-one-vector.patch
 0033-vkd3d-shader-hlsl-Remove-dead-code-by-liveness-fold-.patch
 0034-vkd3d-shader-ir-Compute-values-into-their-destinatio.patch
+0035-vkd3d-shader-ir-Fold-logical-not-into-conditionals-e.patch
