@@ -15,3 +15,7 @@ vkd3d-2.1-93-gcfcb4833
 0014-vkd3d-shader-hlsl-Split-struct-variables-into-one-va.patch
 0015-vkd3d-shader-hlsl-Turn-multiplication-and-unsigned-d.patch
 0016-vkd3d-shader-hlsl-Value-numbering-for-loads-and-expr.patch
+0017-vkd3d-shader-hlsl-Read-variables-in-place-instead-of.patch
+0018-vkd3d-shader-ir-Optionally-keep-live-values-in-separ.patch
+0019-vkd3d-shader-hlsl-Environment-switches-for-the-fxc2-.patch
+0020-vkd3d-shader-hlsl-Lower-switches-without-forcecase-t.patch

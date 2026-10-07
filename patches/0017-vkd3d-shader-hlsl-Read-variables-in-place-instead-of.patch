@@ -1,0 +1,387 @@
+From 7ce264742ad2712309a5cee51324330edf58f4f7 Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Wed, 7 Oct 2026 07:50:46 +0200
+Subject: [PATCH 17/20] vkd3d-shader/hlsl: Read variables in place instead of
+ copying them on every load.
+
+---
+ libs/vkd3d-shader/hlsl.c         |   1 +
+ libs/vkd3d-shader/hlsl.h         |  11 +++
+ libs/vkd3d-shader/hlsl_codegen.c | 158 +++++++++++++++++++++++++------
+ 3 files changed, 140 insertions(+), 30 deletions(-)
+
+diff --git a/libs/vkd3d-shader/hlsl.c b/libs/vkd3d-shader/hlsl.c
+index 1e93d19b..9db214ac 100644
+--- a/libs/vkd3d-shader/hlsl.c
++++ b/libs/vkd3d-shader/hlsl.c
+@@ -203,6 +203,7 @@ void hlsl_free_var(struct hlsl_ir_var *decl)
+ 
+     vkd3d_free((void *)decl->name);
+     vkd3d_free(decl->sroa_fields);
++    vkd3d_free(decl->store_indices);
+     hlsl_cleanup_semantic(&decl->semantic);
+     for (k = 0; k <= HLSL_REGSET_LAST_OBJECT; ++k)
+         vkd3d_free((void *)decl->objects_usage[k]);
+diff --git a/libs/vkd3d-shader/hlsl.h b/libs/vkd3d-shader/hlsl.h
+index 3c6f2c4a..811b935e 100644
+--- a/libs/vkd3d-shader/hlsl.h
++++ b/libs/vkd3d-shader/hlsl.h
+@@ -370,6 +370,10 @@ struct hlsl_ir_node
+      * true even for loops, since currently we can't have a reference to a
+      * value generated in an earlier iteration of the loop. */
+     unsigned int index, last_read;
++    /* fxc2: where the value is really last needed, which unlike last_read is
++     * only pushed to the end of a loop for values defined outside that loop;
++     * and the number of loops enclosing the definition. */
++    unsigned int last_use, loop_depth;
+     /* Temp. register allocated to store the result of this instruction (if any). */
+     struct hlsl_reg reg;
+ };
+@@ -546,6 +550,10 @@ struct hlsl_ir_var
+ 
+     /* Whether the shader performs dereferences with non-constant offsets in the variable. */
+     bool indexable;
++    /* fxc2: liveness indices of the stores to the variable, in order; see
++     * load_can_be_elided(). */
++    unsigned int *store_indices;
++    size_t store_count, store_capacity;
+     /* fxc2: bumped by every store to the variable while value numbering,
+      * see lvn_execute(). */
+     unsigned int lvn_generation;
+@@ -909,6 +917,9 @@ struct hlsl_ir_load
+ {
+     struct hlsl_ir_node node;
+     struct hlsl_deref src;
++    /* fxc2: no instruction is generated; users read the variable's own
++     * register. */
++    bool elided;
+ };
+ 
+ enum hlsl_resource_load_type
+diff --git a/libs/vkd3d-shader/hlsl_codegen.c b/libs/vkd3d-shader/hlsl_codegen.c
+index a7dfc278..3cc542e3 100644
+--- a/libs/vkd3d-shader/hlsl_codegen.c
++++ b/libs/vkd3d-shader/hlsl_codegen.c
+@@ -7563,19 +7563,38 @@ static void allocate_register_reservations(struct hlsl_ctx *ctx, struct list *ex
+     }
+ }
+ 
+-static void deref_mark_last_read(struct hlsl_deref *deref, unsigned int last_read)
++/* fxc2: see struct hlsl_ir_node.last_use. */
++#define LIVENESS_MAX_LOOP_DEPTH 64
++static unsigned int liveness_loop_ends[LIVENESS_MAX_LOOP_DEPTH];
++static unsigned int liveness_loop_depth;
++static bool liveness_loops_too_deep;
++
++static void liveness_note_use(struct hlsl_ir_node *node, unsigned int index)
++{
++    if (liveness_loop_depth > node->loop_depth && node->loop_depth < LIVENESS_MAX_LOOP_DEPTH)
++        index = liveness_loop_ends[node->loop_depth];
++    node->last_use = max(node->last_use, index);
++}
++
++static void deref_mark_last_read(struct hlsl_deref *deref, unsigned int last_read, unsigned int use_index)
+ {
+     unsigned int i;
+ 
+     if (hlsl_deref_is_lowered(deref))
+     {
+         if (deref->rel_offset.node)
++        {
+             deref->rel_offset.node->last_read = last_read;
++            liveness_note_use(deref->rel_offset.node, use_index);
++        }
+     }
+     else
+     {
+         for (i = 0; i < deref->path_len; ++i)
++        {
+             deref->path[i].node->last_read = last_read;
++            liveness_note_use(deref->path[i].node, use_index);
++        }
+     }
+ }
+ 
+@@ -7593,6 +7612,9 @@ static void compute_liveness_recurse(struct hlsl_block *block, unsigned int loop
+     {
+         const unsigned int last_read = loop_last ? max(instr->index, loop_last) : instr->index;
+ 
++        instr->last_use = 0;
++        instr->loop_depth = liveness_loop_depth;
++
+         switch (instr->type)
+         {
+         case HLSL_IR_CALL:
+@@ -7609,8 +7631,13 @@ static void compute_liveness_recurse(struct hlsl_block *block, unsigned int loop
+             var = store->lhs.var;
+             if (!var->first_write)
+                 var->first_write = loop_first ? min(instr->index, loop_first) : instr->index;
+-            store->rhs.node->last_read = last_read;
+-            deref_mark_last_read(&store->lhs, last_read);
++            if (vkd3d_array_reserve((void **)&var->store_indices, &var->store_capacity,
++                    var->store_count + 1, sizeof(*var->store_indices)))
++                var->store_indices[var->store_count++] = instr->index;
++            else
++                liveness_loops_too_deep = true;
++            store->rhs.node->last_read = last_read, liveness_note_use(store->rhs.node, instr->index);
++            deref_mark_last_read(&store->lhs, last_read, instr->index);
+             break;
+         }
+         case HLSL_IR_EXPR:
+@@ -7619,7 +7646,7 @@ static void compute_liveness_recurse(struct hlsl_block *block, unsigned int loop
+             unsigned int i;
+ 
+             for (i = 0; i < ARRAY_SIZE(expr->operands) && expr->operands[i].node; ++i)
+-                expr->operands[i].node->last_read = last_read;
++                expr->operands[i].node->last_read = last_read, liveness_note_use(expr->operands[i].node, instr->index);
+             break;
+         }
+         case HLSL_IR_IF:
+@@ -7628,7 +7655,7 @@ static void compute_liveness_recurse(struct hlsl_block *block, unsigned int loop
+ 
+             compute_liveness_recurse(&iff->then_block, loop_first, loop_last);
+             compute_liveness_recurse(&iff->else_block, loop_first, loop_last);
+-            iff->condition.node->last_read = last_read;
++            iff->condition.node->last_read = last_read, liveness_note_use(iff->condition.node, instr->index);
+             break;
+         }
+         case HLSL_IR_LOAD:
+@@ -7637,19 +7664,25 @@ static void compute_liveness_recurse(struct hlsl_block *block, unsigned int loop
+ 
+             var = load->src.var;
+             var->last_read = max(var->last_read, last_read);
+-            deref_mark_last_read(&load->src, last_read);
++            deref_mark_last_read(&load->src, last_read, instr->index);
+             break;
+         }
+         case HLSL_IR_LOOP:
+         {
+             struct hlsl_ir_loop *loop = hlsl_ir_loop(instr);
+ 
++            if (liveness_loop_depth < LIVENESS_MAX_LOOP_DEPTH)
++                liveness_loop_ends[liveness_loop_depth] = loop->next_index;
++            else
++                liveness_loops_too_deep = true;
++            ++liveness_loop_depth;
+             compute_liveness_recurse(&loop->body, loop_first ? loop_first : instr->index,
+                     loop_last ? loop_last : loop->next_index);
+             compute_liveness_recurse(&loop->iter, loop_first ? loop_first : instr->index,
+                     loop_last ? loop_last : loop->next_index);
++            --liveness_loop_depth;
+             if (loop->unroll_limit.node)
+-                loop->unroll_limit.node->last_read = last_read;
++                loop->unroll_limit.node->last_read = last_read, liveness_note_use(loop->unroll_limit.node, instr->index);
+             break;
+         }
+         case HLSL_IR_RESOURCE_LOAD:
+@@ -7658,30 +7691,30 @@ static void compute_liveness_recurse(struct hlsl_block *block, unsigned int loop
+ 
+             var = load->resource.var;
+             var->last_read = max(var->last_read, last_read);
+-            deref_mark_last_read(&load->resource, last_read);
++            deref_mark_last_read(&load->resource, last_read, instr->index);
+ 
+             if ((var = load->sampler.var))
+             {
+                 var->last_read = max(var->last_read, last_read);
+-                deref_mark_last_read(&load->sampler, last_read);
++                deref_mark_last_read(&load->sampler, last_read, instr->index);
+             }
+ 
+             if (load->byte_offset.node)
+-                load->byte_offset.node->last_read = last_read;
++                load->byte_offset.node->last_read = last_read, liveness_note_use(load->byte_offset.node, instr->index);
+             if (load->coords.node)
+-                load->coords.node->last_read = last_read;
++                load->coords.node->last_read = last_read, liveness_note_use(load->coords.node, instr->index);
+             if (load->texel_offset.node)
+-                load->texel_offset.node->last_read = last_read;
++                load->texel_offset.node->last_read = last_read, liveness_note_use(load->texel_offset.node, instr->index);
+             if (load->lod.node)
+-                load->lod.node->last_read = last_read;
++                load->lod.node->last_read = last_read, liveness_note_use(load->lod.node, instr->index);
+             if (load->ddx.node)
+-                load->ddx.node->last_read = last_read;
++                load->ddx.node->last_read = last_read, liveness_note_use(load->ddx.node, instr->index);
+             if (load->ddy.node)
+-                load->ddy.node->last_read = last_read;
++                load->ddy.node->last_read = last_read, liveness_note_use(load->ddy.node, instr->index);
+             if (load->sample_index.node)
+-                load->sample_index.node->last_read = last_read;
++                load->sample_index.node->last_read = last_read, liveness_note_use(load->sample_index.node, instr->index);
+             if (load->cmp.node)
+-                load->cmp.node->last_read = last_read;
++                load->cmp.node->last_read = last_read, liveness_note_use(load->cmp.node, instr->index);
+             break;
+         }
+         case HLSL_IR_RESOURCE_STORE:
+@@ -7690,28 +7723,28 @@ static void compute_liveness_recurse(struct hlsl_block *block, unsigned int loop
+ 
+             var = store->resource.var;
+             var->last_read = max(var->last_read, last_read);
+-            deref_mark_last_read(&store->resource, last_read);
++            deref_mark_last_read(&store->resource, last_read, instr->index);
+             if (store->coords.node)
+-                store->coords.node->last_read = last_read;
++                store->coords.node->last_read = last_read, liveness_note_use(store->coords.node, instr->index);
+             if (store->value.node)
+-                store->value.node->last_read = last_read;
++                store->value.node->last_read = last_read, liveness_note_use(store->value.node, instr->index);
+             if (store->byte_offset.node)
+-                store->byte_offset.node->last_read = last_read;
++                store->byte_offset.node->last_read = last_read, liveness_note_use(store->byte_offset.node, instr->index);
+             break;
+         }
+         case HLSL_IR_SWIZZLE:
+         {
+             struct hlsl_ir_swizzle *swizzle = hlsl_ir_swizzle(instr);
+ 
+-            swizzle->val.node->last_read = last_read;
++            swizzle->val.node->last_read = last_read, liveness_note_use(swizzle->val.node, instr->index);
+             break;
+         }
+         case HLSL_IR_INDEX:
+         {
+             struct hlsl_ir_index *index = hlsl_ir_index(instr);
+ 
+-            index->val.node->last_read = last_read;
+-            index->idx.node->last_read = last_read;
++            index->val.node->last_read = last_read, liveness_note_use(index->val.node, instr->index);
++            index->idx.node->last_read = last_read, liveness_note_use(index->idx.node, instr->index);
+             break;
+         }
+         case HLSL_IR_INTERLOCKED:
+@@ -7720,12 +7753,12 @@ static void compute_liveness_recurse(struct hlsl_block *block, unsigned int loop
+ 
+             var = interlocked->dst.var;
+             var->last_read = max(var->last_read, last_read);
+-            deref_mark_last_read(&interlocked->dst, last_read);
+-            interlocked->value.node->last_read = last_read;
++            deref_mark_last_read(&interlocked->dst, last_read, instr->index);
++            interlocked->value.node->last_read = last_read, liveness_note_use(interlocked->value.node, instr->index);
+             if (interlocked->coords.node)
+-                interlocked->coords.node->last_read = last_read;
++                interlocked->coords.node->last_read = last_read, liveness_note_use(interlocked->coords.node, instr->index);
+             if (interlocked->cmp_value.node)
+-                interlocked->cmp_value.node->last_read = last_read;
++                interlocked->cmp_value.node->last_read = last_read, liveness_note_use(interlocked->cmp_value.node, instr->index);
+             break;
+         }
+         case HLSL_IR_JUMP:
+@@ -7733,7 +7766,7 @@ static void compute_liveness_recurse(struct hlsl_block *block, unsigned int loop
+             struct hlsl_ir_jump *jump = hlsl_ir_jump(instr);
+ 
+             if (jump->condition.node)
+-                jump->condition.node->last_read = last_read;
++                jump->condition.node->last_read = last_read, liveness_note_use(jump->condition.node, instr->index);
+             break;
+         }
+         case HLSL_IR_SWITCH:
+@@ -7743,7 +7776,7 @@ static void compute_liveness_recurse(struct hlsl_block *block, unsigned int loop
+ 
+             LIST_FOR_EACH_ENTRY(c, &s->cases, struct hlsl_ir_switch_case, entry)
+                 compute_liveness_recurse(&c->body, loop_first, loop_last);
+-            s->selector.node->last_read = last_read;
++            s->selector.node->last_read = last_read, liveness_note_use(s->selector.node, instr->index);
+             break;
+         }
+         case HLSL_IR_CONSTANT:
+@@ -7771,9 +7804,14 @@ static void compute_liveness(struct hlsl_ctx *ctx, struct hlsl_block *body)
+     LIST_FOR_EACH_ENTRY(scope, &ctx->scopes, struct hlsl_scope, entry)
+     {
+         LIST_FOR_EACH_ENTRY(var, &scope->vars, struct hlsl_ir_var, scope_entry)
++        {
+             var->first_write = var->last_read = 0;
++            var->store_count = 0;
++        }
+     }
+ 
++    liveness_loop_depth = 0;
++    liveness_loops_too_deep = false;
+     compute_liveness_recurse(body, 0, 0);
+ }
+ 
+@@ -8318,6 +8356,46 @@ static void allocate_variable_temp_register(struct hlsl_ctx *ctx, struct hlsl_ir
+     }
+ }
+ 
++/* fxc2: a load is normally a mov from the variable's register into a fresh
++ * temporary, which every use then reads. When the variable is not stored to
++ * between the load and the last place its value is needed, the uses can read
++ * the variable's register directly and the mov disappears; in code that keeps
++ * its state in variables that is a large share of all instructions.
++ *
++ * "Between" is in terms of liveness indices, which follow program order, so
++ * a store in a sibling branch counts as well: conservative, but simple. Loops
++ * are covered by last_use, which is the end of the loop when the value was
++ * loaded outside a loop it is used in. A store sitting exactly at last_use is
++ * the user itself, and reads its operands before it writes. */
++static bool load_can_be_elided(struct hlsl_ctx *ctx, const struct hlsl_ir_load *load)
++{
++    const struct hlsl_ir_node *instr = &load->node;
++    const struct hlsl_ir_var *var = load->src.var;
++    size_t low = 0, high = var->store_count;
++
++    if (hlsl_version_lt(ctx, 4, 0) || liveness_loops_too_deep || !instr->last_read || !instr->last_use)
++        return false;
++    if (var->indexable || var->is_uniform || var->is_input_semantic || var->is_output_semantic || var->is_tgsm)
++        return false;
++    if (instr->data_type->class > HLSL_CLASS_VECTOR || instr->data_type->e.numeric.type == HLSL_TYPE_DOUBLE)
++        return false;
++    if (!hlsl_deref_is_lowered(&load->src) || load->src.rel_offset.node
++            || !hlsl_is_numeric_type(load->src.data_type))
++        return false;
++
++    /* First store after the load. */
++    while (low < high)
++    {
++        size_t mid = (low + high) / 2;
++
++        if (var->store_indices[mid] <= instr->index)
++            low = mid + 1;
++        else
++            high = mid;
++    }
++    return low == var->store_count || var->store_indices[low] >= instr->last_use;
++}
++
+ static void allocate_temp_registers_recurse(struct hlsl_ctx *ctx, struct hlsl_block *block)
+ {
+     struct hlsl_ir_node *instr;
+@@ -8328,6 +8406,23 @@ static void allocate_temp_registers_recurse(struct hlsl_ctx *ctx, struct hlsl_bl
+         if (ctx->profile->major_version >= 4 && instr->type == HLSL_IR_CONSTANT)
+             continue;
+ 
++        if (instr->type == HLSL_IR_LOAD && !instr->reg.allocated && load_can_be_elided(ctx, hlsl_ir_load(instr)))
++        {
++            struct hlsl_ir_load *load = hlsl_ir_load(instr);
++
++            allocate_variable_temp_register(ctx, load->src.var);
++            if (load->src.var->regs[HLSL_REGSET_NUMERIC].allocated)
++            {
++                instr->reg = hlsl_reg_from_deref(ctx, &load->src);
++                instr->reg.writemask = hlsl_combine_writemasks(instr->reg.writemask,
++                        vkd3d_write_mask_from_component_count(instr->data_type->e.numeric.dimx));
++                instr->reg.type = VSIR_REGISTER_TEMP;
++                instr->reg.allocated = true;
++                load->elided = true;
++                continue;
++            }
++        }
++
+         allocate_instr_temp_register(ctx, instr);
+ 
+         switch (instr->type)
+@@ -13886,6 +13981,9 @@ static bool sm4_generate_vsir_instr_load(struct hlsl_ctx *ctx, struct vsir_progr
+     struct vsir_instruction *ins;
+     struct vsir_dst_operand *dst;
+ 
++    if (load->elided)
++        return true;
++
+     VKD3D_ASSERT(!load->src.var->is_tgsm);
+     VKD3D_ASSERT(hlsl_is_numeric_type(type));
+     if (type->e.numeric.type == HLSL_TYPE_BOOL && var_is_user_input(version, load->src.var))
+-- 
+2.53.0
+

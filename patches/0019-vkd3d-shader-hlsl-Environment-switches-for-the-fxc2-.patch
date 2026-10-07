@@ -1,0 +1,62 @@
+From a6f2a6c2a5712ab68f1042527b6754feab7a48b7 Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Wed, 7 Oct 2026 07:53:56 +0200
+Subject: [PATCH 19/20] vkd3d-shader/hlsl: Environment switches for the fxc2
+ optimisations.
+
+---
+ libs/vkd3d-shader/hlsl_codegen.c | 17 +++++++++++++++--
+ 1 file changed, 15 insertions(+), 2 deletions(-)
+
+diff --git a/libs/vkd3d-shader/hlsl_codegen.c b/libs/vkd3d-shader/hlsl_codegen.c
+index 3cc542e3..6518c6a9 100644
+--- a/libs/vkd3d-shader/hlsl_codegen.c
++++ b/libs/vkd3d-shader/hlsl_codegen.c
+@@ -8367,6 +8367,15 @@ static void allocate_variable_temp_register(struct hlsl_ctx *ctx, struct hlsl_ir
+  * are covered by last_use, which is the end of the loop when the value was
+  * loaded outside a loop it is used in. A store sitting exactly at last_use is
+  * the user itself, and reads its operands before it writes. */
++/* fxc2: switches for measuring what each optimisation is worth on a given
++ * driver: VARIABLE=0 turns one off, VARIABLE=1 on. */
++static bool hlsl_tuning_enabled(const char *variable, bool default_value)
++{
++    const char *env = getenv(variable);
++
++    return env ? !!atoi(env) : default_value;
++}
++
+ static bool load_can_be_elided(struct hlsl_ctx *ctx, const struct hlsl_ir_load *load)
+ {
+     const struct hlsl_ir_node *instr = &load->node;
+@@ -8375,6 +8384,8 @@ static bool load_can_be_elided(struct hlsl_ctx *ctx, const struct hlsl_ir_load *
+ 
+     if (hlsl_version_lt(ctx, 4, 0) || liveness_loops_too_deep || !instr->last_read || !instr->last_use)
+         return false;
++    if (!hlsl_tuning_enabled("VKD3D_HLSL_ELIDE_LOADS", true))
++        return false;
+     if (var->indexable || var->is_uniform || var->is_input_semantic || var->is_output_semantic || var->is_tgsm)
+         return false;
+     if (instr->data_type->class > HLSL_CLASS_VECTOR || instr->data_type->e.numeric.type == HLSL_TYPE_DOUBLE)
+@@ -17604,7 +17615,8 @@ static void process_entry_function(struct hlsl_ctx *ctx, struct vsir_program *pr
+     remove_unreachable_code(ctx, body);
+     hlsl_transform_ir(ctx, normalize_switch_cases, body, NULL);
+ 
+-    if (hlsl_version_ge(ctx, 4, 0) && sroa_execute(ctx, body))
++    if (hlsl_version_ge(ctx, 4, 0) && hlsl_tuning_enabled("VKD3D_HLSL_SPLIT_STRUCTS", true)
++            && sroa_execute(ctx, body))
+         hlsl_run_const_passes(ctx, body);
+ 
+     replace_ir(ctx, lower_vector_derefs, body);
+@@ -17682,7 +17694,8 @@ static void process_entry_function(struct hlsl_ctx *ctx, struct vsir_program *pr
+     replace_ir(ctx, validate_nonconstant_vector_store_derefs, body);
+ 
+     hlsl_run_folding_passes(ctx, body);
+-    if (hlsl_version_ge(ctx, 4, 0) && lvn_execute(ctx, body))
++    if (hlsl_version_ge(ctx, 4, 0) && hlsl_tuning_enabled("VKD3D_HLSL_VALUE_NUMBERING", true)
++            && lvn_execute(ctx, body))
+         hlsl_run_folding_passes(ctx, body);
+     run_dead_code_elimination_passes(ctx, body);
+ 
+-- 
+2.53.0
+

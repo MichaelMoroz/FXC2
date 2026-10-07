@@ -1,0 +1,52 @@
+From 3161e8af452c414923ec9aa8b9663196fe101d00 Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Wed, 7 Oct 2026 07:52:37 +0200
+Subject: [PATCH 18/20] vkd3d-shader/ir: Optionally keep live values in
+ separate registers.
+
+---
+ libs/vkd3d-shader/ir.c | 21 +++++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+
+diff --git a/libs/vkd3d-shader/ir.c b/libs/vkd3d-shader/ir.c
+index 0cf0321c..0b1ff3df 100644
+--- a/libs/vkd3d-shader/ir.c
++++ b/libs/vkd3d-shader/ir.c
+@@ -12336,6 +12336,23 @@ static const char *debug_temp_allocator_reg(const struct temp_allocator_reg *reg
+     return vkd3d_dbg_sprintf("%s%u", reg->type == VSIR_REGISTER_SSA ? "sr" : "r", reg->idx);
+ }
+ 
++/* fxc2: whether values that are live at the same time may share the
++ * components of one register. Packing keeps the register count down, but a
++ * driver that tracks registers as whole vectors then sees every write to one
++ * value as a change to its neighbours. Controlled by VKD3D_PACK_REGISTERS. */
++static bool temp_allocator_pack_registers(void)
++{
++    static int pack = -1;
++
++    if (pack < 0)
++    {
++        const char *env = getenv("VKD3D_PACK_REGISTERS");
++
++        pack = env ? !!atoi(env) : 1;
++    }
++    return pack;
++}
++
+ static void temp_allocator_open_register(struct temp_allocator *allocator, struct temp_allocator_reg *reg)
+ {
+     const size_t reg_count = allocator->ssa_count + allocator->temp_count;
+@@ -12350,6 +12367,10 @@ static void temp_allocator_open_register(struct temp_allocator *allocator, struc
+     {
+         const uint8_t available_mask = ~current_allocation[i] & 0xf;
+ 
++        /* fxc2: see temp_allocator_pack_registers(). */
++        if (!temp_allocator_pack_registers() && available_mask != 0xf)
++            continue;
++
+         if (liveness_reg->fixed_mask)
+         {
+             if ((available_mask & liveness_reg->mask) == liveness_reg->mask)
+-- 
+2.53.0
+
