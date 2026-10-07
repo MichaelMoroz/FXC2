@@ -1,0 +1,528 @@
+From 08bc1af95135f786bcd94bc59aa3b5c195501c24 Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Wed, 7 Oct 2026 17:03:07 +0200
+Subject: [PATCH 34/34] vkd3d-shader/ir: Compute values into their destination,
+ read variables in place.
+
+---
+ libs/vkd3d-shader/ir.c | 497 +++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 497 insertions(+)
+
+diff --git a/libs/vkd3d-shader/ir.c b/libs/vkd3d-shader/ir.c
+index 1c7628ed..4ecaa843 100644
+--- a/libs/vkd3d-shader/ir.c
++++ b/libs/vkd3d-shader/ir.c
+@@ -12639,6 +12639,500 @@ static enum vkd3d_result temp_allocator_compute_allocation_map(struct temp_alloc
+     return VKD3D_OK;
+ }
+ 
++/* fxc2: write results where they are going.
++ *
++ * The HLSL compiler computes every value into a register of its own and then
++ * stores it:
++ *
++ *     dp3 sr5.x, v3.xyzx, r3.xyzx          max sr7.x, sr6.x, sr4.x
++ *     mov r4.y, sr5.x                      mov_sat sr8.x, sr7.x
++ *
++ * Three of every four mov instructions in what it generates for a typical
++ * shader are of this kind, and they are most of the difference in size to
++ * what FXC generates. When the value is used for nothing else, compute it
++ * straight into the destination:
++ *
++ *     dp3 r4.y, v3.xyzx, r3.xyzx           max_sat sr8.x, sr6.x, sr4.x
++ *
++ * For a destination that is a variable (a temp register), nothing between
++ * the two instructions may touch it and they must be in the same block. */
++enum forward_kind
++{
++    FORWARD_NONE,
++    /* Every source is selected by the destination write mask. */
++    FORWARD_COMPONENTWISE,
++    /* One result, written to whichever components are asked for. */
++    FORWARD_BROADCAST,
++    /* The swizzle of the resource operand selects the components. */
++    FORWARD_RESOURCE,
++};
++
++static enum forward_kind vsir_opcode_forward_kind(enum vsir_opcode opcode)
++{
++    switch (opcode)
++    {
++        case VSIR_OP_ADD:
++        case VSIR_OP_AND:
++        case VSIR_OP_DIV:
++        case VSIR_OP_DSX:
++        case VSIR_OP_DSX_COARSE:
++        case VSIR_OP_DSX_FINE:
++        case VSIR_OP_DSY:
++        case VSIR_OP_DSY_COARSE:
++        case VSIR_OP_DSY_FINE:
++        case VSIR_OP_EQO:
++        case VSIR_OP_EQU:
++        case VSIR_OP_EXP:
++        case VSIR_OP_FRC:
++        case VSIR_OP_FTOI:
++        case VSIR_OP_FTOU:
++        case VSIR_OP_GEO:
++        case VSIR_OP_GEU:
++        case VSIR_OP_IADD:
++        case VSIR_OP_IEQ:
++        case VSIR_OP_IGE:
++        case VSIR_OP_ILT:
++        case VSIR_OP_IMAX:
++        case VSIR_OP_IMIN:
++        case VSIR_OP_INE:
++        case VSIR_OP_INEG:
++        case VSIR_OP_ISHL:
++        case VSIR_OP_ISHR:
++        case VSIR_OP_ITOF:
++        case VSIR_OP_LOG:
++        case VSIR_OP_LTO:
++        case VSIR_OP_LTU:
++        case VSIR_OP_MAD:
++        case VSIR_OP_MAX:
++        case VSIR_OP_MIN:
++        case VSIR_OP_MOV:
++        case VSIR_OP_MOVC:
++        case VSIR_OP_MUL:
++        case VSIR_OP_NEO:
++        case VSIR_OP_NEU:
++        case VSIR_OP_NOT:
++        case VSIR_OP_OR:
++        case VSIR_OP_ROUND_NE:
++        case VSIR_OP_ROUND_NI:
++        case VSIR_OP_ROUND_PI:
++        case VSIR_OP_ROUND_Z:
++        case VSIR_OP_RSQ:
++        case VSIR_OP_SQRT:
++        case VSIR_OP_UGE:
++        case VSIR_OP_ULT:
++        case VSIR_OP_UMAX:
++        case VSIR_OP_UMIN:
++        case VSIR_OP_USHR:
++        case VSIR_OP_UTOF:
++        case VSIR_OP_XOR:
++            return FORWARD_COMPONENTWISE;
++
++        case VSIR_OP_DP2:
++        case VSIR_OP_DP3:
++        case VSIR_OP_DP4:
++            return FORWARD_BROADCAST;
++
++        case VSIR_OP_GATHER4:
++        case VSIR_OP_LD:
++        case VSIR_OP_LD2DMS:
++        case VSIR_OP_SAMPLE:
++        case VSIR_OP_SAMPLE_B:
++        case VSIR_OP_SAMPLE_C:
++        case VSIR_OP_SAMPLE_C_LZ:
++        case VSIR_OP_SAMPLE_GRAD:
++        case VSIR_OP_SAMPLE_LOD:
++            return FORWARD_RESOURCE;
++
++        default:
++            return FORWARD_NONE;
++    }
++}
++
++static bool vsir_opcode_takes_saturate(enum vsir_opcode opcode)
++{
++    switch (opcode)
++    {
++        case VSIR_OP_ADD:
++        case VSIR_OP_DIV:
++        case VSIR_OP_DP2:
++        case VSIR_OP_DP3:
++        case VSIR_OP_DP4:
++        case VSIR_OP_MAD:
++        case VSIR_OP_MAX:
++        case VSIR_OP_MIN:
++        case VSIR_OP_MOV:
++        case VSIR_OP_MUL:
++            return true;
++
++        default:
++            return false;
++    }
++}
++
++static bool vsir_opcode_is_block_boundary(enum vsir_opcode opcode)
++{
++    switch (opcode)
++    {
++        case VSIR_OP_BREAK:
++        case VSIR_OP_BREAKC:
++        case VSIR_OP_BREAKP:
++        case VSIR_OP_CASE:
++        case VSIR_OP_CONTINUE:
++        case VSIR_OP_CONTINUEP:
++        case VSIR_OP_CUT:
++        case VSIR_OP_CUT_STREAM:
++        case VSIR_OP_DEFAULT:
++        case VSIR_OP_ELSE:
++        case VSIR_OP_EMIT:
++        case VSIR_OP_EMIT_STREAM:
++        case VSIR_OP_ENDIF:
++        case VSIR_OP_ENDLOOP:
++        case VSIR_OP_ENDSWITCH:
++        case VSIR_OP_HS_CONTROL_POINT_PHASE:
++        case VSIR_OP_HS_DECLS:
++        case VSIR_OP_HS_FORK_PHASE:
++        case VSIR_OP_HS_JOIN_PHASE:
++        case VSIR_OP_IF:
++        case VSIR_OP_IFC:
++        case VSIR_OP_LABEL:
++        case VSIR_OP_LOOP:
++        case VSIR_OP_RET:
++        case VSIR_OP_RETP:
++        case VSIR_OP_SWITCH:
++            return true;
++
++        default:
++            return false;
++    }
++}
++
++struct forward_ssa
++{
++    struct vsir_instruction *def;
++    unsigned int def_index, use_count;
++};
++
++static void forward_count_operand(struct forward_ssa *ssa, const struct vsir_operand *reg)
++{
++    for (unsigned int k = 0; k < reg->idx_count; ++k)
++    {
++        if (reg->idx[k].rel_addr)
++            forward_count_operand(ssa, &reg->idx[k].rel_addr->reg);
++    }
++    if (reg->type == VSIR_REGISTER_SSA)
++        ++ssa[reg->idx[0].offset].use_count;
++}
++
++static bool vsir_operand_mentions_temp(const struct vsir_operand *reg, unsigned int temp)
++{
++    for (unsigned int k = 0; k < reg->idx_count; ++k)
++    {
++        if (reg->idx[k].rel_addr && vsir_operand_mentions_temp(&reg->idx[k].rel_addr->reg, temp))
++            return true;
++    }
++    return reg->type == VSIR_REGISTER_TEMP && reg->idx[0].offset == temp;
++}
++
++static bool vsir_instruction_mentions_temp(const struct vsir_instruction *ins, unsigned int temp)
++{
++    for (unsigned int i = 0; i < ins->src_count; ++i)
++    {
++        if (vsir_operand_mentions_temp(&ins->src[i].reg, temp))
++            return true;
++    }
++    for (unsigned int i = 0; i < ins->dst_count; ++i)
++    {
++        if (vsir_operand_mentions_temp(&ins->dst[i].reg, temp))
++            return true;
++    }
++    return false;
++}
++
++/* Makes "def" write what "mov" writes. */
++static bool forward_destination(struct vsir_instruction *def, struct vsir_instruction *mov)
++{
++    enum forward_kind kind = vsir_opcode_forward_kind(def->opcode);
++    uint32_t mask = mov->dst[0].write_mask, def_mask = def->dst[0].write_mask;
++    enum vsir_data_type data_type = def->dst[0].reg.data_type;
++    unsigned int map[VKD3D_VEC4_SIZE], first = ~0u;
++
++    if (kind == FORWARD_NONE || !mask)
++        return false;
++    if (kind == FORWARD_RESOURCE && (mask != VKD3DSP_WRITEMASK_ALL || def->src_count < 2))
++        return false;
++    if (mov->dst[0].modifiers && !vsir_opcode_takes_saturate(def->opcode))
++        return false;
++
++    for (unsigned int j = 0; j < VKD3D_VEC4_SIZE; ++j)
++    {
++        if (!(mask & (1u << j)))
++            continue;
++        map[j] = vsir_swizzle_get_component(mov->src[0].swizzle, j);
++        if (!(def_mask & (1u << map[j])))
++            return false;
++        if (first == ~0u)
++            first = map[j];
++    }
++    for (unsigned int j = 0; j < VKD3D_VEC4_SIZE; ++j)
++    {
++        if (!(mask & (1u << j)))
++            map[j] = first;
++    }
++
++    if (kind == FORWARD_COMPONENTWISE)
++    {
++        for (unsigned int i = 0; i < def->src_count; ++i)
++        {
++            const struct vsir_operand *reg = &def->src[i].reg;
++
++            if (!vsir_src_is_masked(def->opcode, i) || reg->type == VSIR_REGISTER_IMMCONST64)
++                return false;
++        }
++    }
++
++    for (unsigned int i = 0; i < def->src_count; ++i)
++    {
++        struct vsir_src_operand *src = &def->src[i];
++        uint32_t swizzle = 0;
++
++        if (kind == FORWARD_BROADCAST || (kind == FORWARD_RESOURCE && i != 1)
++                || src->reg.dimension != VSIR_DIMENSION_VEC4)
++            continue;
++
++        if (src->reg.type == VSIR_REGISTER_IMMCONST)
++        {
++            uint32_t values[VKD3D_VEC4_SIZE];
++
++            for (unsigned int j = 0; j < VKD3D_VEC4_SIZE; ++j)
++                values[j] = src->reg.u.immconst_u32[map[j]];
++            memcpy(src->reg.u.immconst_u32, values, sizeof(values));
++            continue;
++        }
++
++        for (unsigned int j = 0; j < VKD3D_VEC4_SIZE; ++j)
++            vsir_swizzle_set_component(&swizzle, j, vsir_swizzle_get_component(src->swizzle, map[j]));
++        src->swizzle = swizzle;
++    }
++
++    def->dst[0] = mov->dst[0];
++    def->dst[0].reg.data_type = data_type;
++    vsir_instruction_make_nop(mov);
++    return true;
++}
++
++static bool vsir_instruction_writes_temp(const struct vsir_instruction *ins, unsigned int temp)
++{
++    for (unsigned int i = 0; i < ins->dst_count; ++i)
++    {
++        if (ins->dst[i].reg.type == VSIR_REGISTER_TEMP && ins->dst[i].reg.idx[0].offset == temp)
++            return true;
++    }
++    return false;
++}
++
++static unsigned int forward_count_ssa_in_indices(const struct vsir_operand *reg, unsigned int id)
++{
++    unsigned int count = 0;
++
++    for (unsigned int k = 0; k < reg->idx_count; ++k)
++    {
++        const struct vsir_src_operand *rel_addr = reg->idx[k].rel_addr;
++
++        if (!rel_addr)
++            continue;
++        count += forward_count_ssa_in_indices(&rel_addr->reg, id);
++        if (rel_addr->reg.type == VSIR_REGISTER_SSA && rel_addr->reg.idx[0].offset == id)
++            ++count;
++    }
++    return count;
++}
++
++/* The other direction: a variable is read by copying it,
++ *
++ *     mov sr3.xy, r4.xyxx
++ *     mad sr5.xy, sr3.xyxx, ...
++ *
++ * and unless the variable changes before the copy is last used, the copy is
++ * not needed. "list[index]" is the mov; returns whether it was removed. */
++static bool forward_source(struct vsir_instruction **list, unsigned int count, unsigned int index,
++        const struct forward_ssa *ssa)
++{
++    struct vsir_instruction *mov = list[index];
++    unsigned int id = mov->dst[0].reg.idx[0].offset, temp = mov->src[0].reg.idx[0].offset;
++    unsigned int remaining = ssa[id].use_count, end;
++
++    if (!remaining)
++        return false;
++
++    for (end = index + 1; end < count && end - index <= 64; ++end)
++    {
++        const struct vsir_instruction *ins = list[end];
++
++        if (vsir_opcode_is_block_boundary(ins->opcode))
++            return false;
++        for (unsigned int i = 0; i < ins->src_count; ++i)
++        {
++            const struct vsir_src_operand *src = &ins->src[i];
++
++            /* As an array index it would need its swizzle looking at. */
++            if (forward_count_ssa_in_indices(&src->reg, id))
++                return false;
++            if (src->reg.type != VSIR_REGISTER_SSA || src->reg.idx[0].offset != id)
++                continue;
++            if (src->reg.dimension != VSIR_DIMENSION_VEC4)
++                return false;
++            for (unsigned int j = 0; j < VKD3D_VEC4_SIZE; ++j)
++            {
++                /* Components the copy does not have may be named where they
++                 * are not used; all the same, leave those alone. */
++                if (!(mov->dst[0].write_mask & (1u << vsir_swizzle_get_component(src->swizzle, j))))
++                    return false;
++            }
++            --remaining;
++        }
++        for (unsigned int i = 0; i < ins->dst_count; ++i)
++        {
++            if (forward_count_ssa_in_indices(&ins->dst[i].reg, id))
++                return false;
++        }
++        if (!remaining)
++            break;
++        if (vsir_instruction_writes_temp(ins, temp))
++            return false;
++    }
++    if (remaining)
++        return false;
++
++    for (unsigned int k = index + 1; k <= end; ++k)
++    {
++        struct vsir_instruction *ins = list[k];
++
++        for (unsigned int i = 0; i < ins->src_count; ++i)
++        {
++            struct vsir_src_operand *src = &ins->src[i];
++            enum vsir_data_type data_type = src->reg.data_type;
++            uint32_t swizzle = 0;
++
++            if (src->reg.type != VSIR_REGISTER_SSA || src->reg.idx[0].offset != id)
++                continue;
++            for (unsigned int j = 0; j < VKD3D_VEC4_SIZE; ++j)
++                vsir_swizzle_set_component(&swizzle, j, vsir_swizzle_get_component(mov->src[0].swizzle,
++                        vsir_swizzle_get_component(src->swizzle, j)));
++            src->reg = mov->src[0].reg;
++            src->reg.data_type = data_type;
++            src->swizzle = swizzle;
++        }
++    }
++    vsir_instruction_make_nop(mov);
++    return true;
++}
++
++static enum vkd3d_result vsir_program_forward_destinations(struct vsir_program *program)
++{
++    struct vsir_program_iterator it = vsir_program_iterator(&program->instructions);
++    struct vsir_instruction *ins, **list;
++    struct forward_ssa *ssa;
++    unsigned int count = 0;
++    const char *env;
++
++    if (!program->ssa_count || ((env = getenv("VKD3D_FORWARD_STORES")) && !strcmp(env, "0")))
++        return VKD3D_OK;
++
++    for (ins = vsir_program_iterator_head(&it); ins; ins = vsir_program_iterator_next(&it))
++        ++count;
++    ssa = vkd3d_calloc(program->ssa_count, sizeof(*ssa));
++    list = vkd3d_calloc(count + 1, sizeof(*list));
++    if (!ssa || !list)
++    {
++        vkd3d_free(ssa);
++        vkd3d_free(list);
++        return VKD3D_ERROR_OUT_OF_MEMORY;
++    }
++
++    count = 0;
++    for (ins = vsir_program_iterator_head(&it); ins; ins = vsir_program_iterator_next(&it))
++    {
++        for (unsigned int i = 0; i < ins->src_count; ++i)
++            forward_count_operand(ssa, &ins->src[i].reg);
++        for (unsigned int i = 0; i < ins->dst_count; ++i)
++        {
++            const struct vsir_operand *reg = &ins->dst[i].reg;
++
++            for (unsigned int k = 0; k < reg->idx_count; ++k)
++            {
++                if (reg->idx[k].rel_addr)
++                    forward_count_operand(ssa, &reg->idx[k].rel_addr->reg);
++            }
++            if (reg->type == VSIR_REGISTER_SSA)
++            {
++                /* More than one definition should not happen; never touch it. */
++                if (ssa[reg->idx[0].offset].def || ins->dst_count != 1)
++                    ssa[reg->idx[0].offset].use_count = 2;
++                ssa[reg->idx[0].offset].def = ins;
++                ssa[reg->idx[0].offset].def_index = count;
++            }
++        }
++        list[count++] = ins;
++    }
++
++    for (unsigned int i = 0; i < count; ++i)
++    {
++        ins = list[i];
++        if (ins->opcode == VSIR_OP_MOV && ins->dst_count == 1 && ins->src_count == 1
++                && ins->dst[0].reg.type == VSIR_REGISTER_SSA && !ins->dst[0].modifiers
++                && ins->src[0].reg.type == VSIR_REGISTER_TEMP && !ins->src[0].modifiers
++                && ins->src[0].reg.idx_count == 1 && !ins->src[0].reg.idx[0].rel_addr
++                && ins->src[0].reg.dimension == VSIR_DIMENSION_VEC4
++                && ssa[ins->dst[0].reg.idx[0].offset].def == ins)
++            forward_source(list, count, i, ssa);
++    }
++
++    for (unsigned int i = 0; i < count; ++i)
++    {
++        const struct forward_ssa *value;
++        const struct vsir_operand *dst;
++        bool clear = true;
++
++        ins = list[i];
++        if (ins->opcode != VSIR_OP_MOV || ins->dst_count != 1 || ins->src_count != 1
++                || ins->src[0].reg.type != VSIR_REGISTER_SSA || ins->src[0].modifiers
++                || (ins->dst[0].modifiers & ~VKD3DSPDM_SATURATE))
++            continue;
++        dst = &ins->dst[0].reg;
++        if ((dst->type != VSIR_REGISTER_SSA && dst->type != VSIR_REGISTER_TEMP)
++                || dst->idx_count != 1 || dst->idx[0].rel_addr)
++            continue;
++
++        value = &ssa[ins->src[0].reg.idx[0].offset];
++        if (!value->def || value->use_count != 1 || value->def_index >= i || value->def->dst[0].modifiers)
++            continue;
++
++        if (dst->type == VSIR_REGISTER_TEMP)
++        {
++            if (i - value->def_index > 64)
++                continue;
++            for (unsigned int j = value->def_index + 1; j < i && clear; ++j)
++            {
++                if (vsir_opcode_is_block_boundary(list[j]->opcode)
++                        || vsir_instruction_mentions_temp(list[j], dst->idx[0].offset))
++                    clear = false;
++            }
++            if (!clear)
++                continue;
++        }
++
++        if (forward_destination(value->def, ins) && dst->type == VSIR_REGISTER_SSA)
++        {
++            ssa[dst->idx[0].offset].def = value->def;
++            ssa[dst->idx[0].offset].def_index = value->def_index;
++        }
++    }
++
++    vkd3d_free(ssa);
++    vkd3d_free(list);
++    return VKD3D_OK;
++}
++
+ /* This pass does two things:
+  *
+  * - converts SSA registers (sr#) into temp registers (r#);
+@@ -12668,6 +13162,9 @@ static enum vkd3d_result vsir_allocate_temp_registers(struct vsir_program *progr
+     if (!program->ssa_count && !program->temp_count)
+         return VKD3D_OK;
+ 
++    if ((ret = vsir_program_forward_destinations(program)) < 0)
++        return ret;
++
+     if ((ret = track_liveness(program, &tracker)))
+         return ret;
+ 
+-- 
+2.53.0
+

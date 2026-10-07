@@ -31,7 +31,7 @@ PLAIN = {
     "VKD3D_HLSL_SPLIT_STRUCTS": "0", "VKD3D_HLSL_VALUE_NUMBERING": "0", "VKD3D_HLSL_ELIDE_LOADS": "0",
     "VKD3D_HLSL_RETURN_ELSE": "0", "VKD3D_HLSL_RETURN_DUP": "0", "VKD3D_HLSL_RETURN_SWITCH": "0",
     "VKD3D_HLSL_SWITCH": "1", "VKD3D_HLSL_UNROLL_BUDGET": "0", "VKD3D_HLSL_KEEP_ARRAY_BRANCHES": "0",
-    "VKD3D_PACK_REGISTERS": "1", "VKD3D_HLSL_SCALAR_MUL": "1", "VKD3D_HLSL_MAD": "0", "VKD3D_HLSL_ADCE": "0",
+    "VKD3D_PACK_REGISTERS": "1", "VKD3D_HLSL_SCALAR_MUL": "1", "VKD3D_HLSL_MAD": "0", "VKD3D_HLSL_ADCE": "0", "VKD3D_FORWARD_STORES": "0",
 }
 NOT_INSTRUCTIONS = ("//", "dcl_", "vs_", "ps_", "gs_", "cs_", "hs_", "ds_")
 
@@ -57,7 +57,7 @@ def compile_one(args):
     compat = ["-Gec"] if flags & 0x1000 else []
     for kind, env in (("opt", {}), ("plain", PLAIN)):
         out = "%s.%s.dxbc" % (base, kind)
-        e = {k: v for k, v in os.environ.items() if not k.startswith(("VKD3D_HLSL_", "VKD3D_PACK"))}
+        e = {k: v for k, v in os.environ.items() if not k.startswith(("VKD3D_HLSL_", "VKD3D_PACK", "VKD3D_FORWARD"))}
         e.update(env)
         p = subprocess.run([FXC2, "-T", profile, "-E", entry, "-Fo", out, path] + compat,
                            capture_output=True, text=True, errors="replace", env=e)
