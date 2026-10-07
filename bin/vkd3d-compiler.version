@@ -36,3 +36,5 @@ vkd3d-2.1-93-gcfcb4833
 0035-vkd3d-shader-ir-Fold-logical-not-into-conditionals-e.patch
 0036-vkd3d-shader-ir-Read-swizzles-of-values-in-place-fol.patch
 0037-vkd3d-shader-ir-Forward-values-that-are-stored-and-u.patch
+0038-vkd3d-shader-hlsl-Pass-inout-arrays-by-reference-whe.patch
+0039-vkd3d-shader-preproc-Predefine-__FXC2__.patch

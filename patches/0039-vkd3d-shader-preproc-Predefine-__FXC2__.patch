@@ -1,0 +1,39 @@
+From fcf0a9a1a1a2b0944f5ea57ec75ea6d1d0cbeafe Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Wed, 7 Oct 2026 19:46:40 +0200
+Subject: [PATCH 39/39] vkd3d-shader/preproc: Predefine __FXC2__.
+
+---
+ libs/vkd3d-shader/preproc.l | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/libs/vkd3d-shader/preproc.l b/libs/vkd3d-shader/preproc.l
+index 020db924..6986b629 100644
+--- a/libs/vkd3d-shader/preproc.l
++++ b/libs/vkd3d-shader/preproc.l
+@@ -923,6 +923,22 @@ int preproc_lexer_parse(const struct vkd3d_shader_compile_info *compile_info,
+     if (!(source_name = vkd3d_strdup(loc.source_name)))
+         goto fail;
+ 
++    /* fxc2: lets a shader tell this compiler from Microsoft's, for what only
++     * one of them can compile (or compile well). */
++    {
++        struct vkd3d_string_buffer body;
++        char *name;
++
++        vkd3d_string_buffer_init(&body);
++        vkd3d_string_buffer_printf(&body, "1");
++        if (!(name = vkd3d_strdup("__FXC2__")) || !preproc_add_macro(&ctx, &loc, name, NULL, 0, &loc, &body))
++        {
++            vkd3d_free(name);
++            vkd3d_string_buffer_cleanup(&body);
++            goto fail;
++        }
++    }
++
+     for (i = 0; i < ctx.preprocess_info->macro_count; ++i)
+     {
+         struct vkd3d_string_buffer body;
+-- 
+2.53.0
+

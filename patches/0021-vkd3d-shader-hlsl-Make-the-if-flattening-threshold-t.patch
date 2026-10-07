@@ -1,7 +1,7 @@
 From d1afd3965e1cce7b83df51d990ac4c443f97cd39 Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 08:03:01 +0200
-Subject: [PATCH 21/37] vkd3d-shader/hlsl: Make the if-flattening threshold
+Subject: [PATCH 21/39] vkd3d-shader/hlsl: Make the if-flattening threshold
  tunable.
 
 ---

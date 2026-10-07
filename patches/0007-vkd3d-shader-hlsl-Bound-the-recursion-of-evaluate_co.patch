@@ -1,7 +1,7 @@
 From 63078394991920b64e9b633e3e9d66dbd9968c3a Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 06:44:48 +0200
-Subject: [PATCH 07/37] vkd3d-shader/hlsl: Bound the recursion of
+Subject: [PATCH 07/39] vkd3d-shader/hlsl: Bound the recursion of
  evaluate_conditionals_recurse().
 
 ---
