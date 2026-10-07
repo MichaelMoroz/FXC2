@@ -22,7 +22,10 @@ XINC="$WORK/xinc"
 mkdir -p "$WORK"
 [ -d "$SRC" ] || git clone -q "$VKD3D_URL" "$SRC"
 git -C "$SRC" fetch -q origin
-git -C "$SRC" checkout -q "$VKD3D_REF"
+git -C "$SRC" checkout -q -f "$VKD3D_REF"
+for p in "$REPO"/patches/*.patch; do
+    git -C "$SRC" apply --whitespace=nowarn "$p"
+done
 
 # configure insists on Vulkan + SPIR-V headers even though vkd3d-compiler only
 # needs the SPIR-V ones. Stage just those so no Linux system headers leak into
@@ -44,5 +47,16 @@ mkdir -p "$BUILD" && cd "$BUILD"
 # Plain "make" (not a single target) so BUILT_SOURCES (widl headers) get generated.
 make -j"$(nproc)"
 "$HOST-strip" -o "$REPO/bin/vkd3d-compiler.exe" vkd3d-compiler.exe
-git -C "$SRC" describe --tags > "$REPO/bin/vkd3d-compiler.version"
+{ git -C "$SRC" describe --tags; ls "$REPO/patches"; } > "$REPO/bin/vkd3d-compiler.version"
 ls -l "$REPO/bin/vkd3d-compiler.exe"
+
+# fxc2.exe (fxc-compatible CLI) and a drop-in d3dcompiler_47.dll, both linked
+# statically against libvkd3d-utils' implementation of the d3dcompiler API.
+# libvkd3d only dlopens Vulkan for D3D12 device creation, which is never
+# reached from the compiler entry points, so there is no Vulkan dependency.
+LIBS="-L$BUILD/.libs -lvkd3d-utils -lvkd3d -lvkd3d-shader -lvkd3d-common"
+CC="$HOST-gcc -O2 -s -static -Wall"
+$CC -o "$REPO/bin/fxc2.exe" "$REPO/src/fxc2.c" $LIBS
+$CC -shared -o "$REPO/bin/d3dcompiler_47.dll" "$REPO/src/d3dcompiler_shim.c" \
+    "$REPO/src/d3dcompiler_47.def" $LIBS
+ls -l "$REPO/bin"

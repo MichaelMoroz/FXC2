@@ -1,3 +1,6 @@
 *.sh text eol=lf
 *.exe binary
 *.dxbc binary
+*.patch text eol=lf
+*.dll binary
+*.def text eol=lf

@@ -1,4 +1,5 @@
 // profile: ps_5_0
+// render: 128 128 1.5 0
 // Shadertoy-style: the kind of loop/branch heavy shader FXC is slow on.
 cbuffer C : register(b0) { float2 resolution; float time; float pad; };
 
