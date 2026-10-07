@@ -38,8 +38,10 @@ Use `-T` rather than `/T` from Git Bash (MSYS rewrites `/T` into a path).
 Measured on this machine by `tests/run.py`, `tests/bench.py` and
 `tests/features.py`; FXC 10.0.26100 is the reference.
 
-**Correctness.** All 12 test shaders compile and are accepted by the D3D11
-runtime, on WARP and on the hardware GPU (`--gpu`). The four pixel shaders with
+**Correctness.** All 12 test shaders compile (10 directly, one each through
+the Slang and DXC routes). The 11 that target SM4+ are accepted by the D3D11
+runtime, on WARP and on the hardware GPU (`--gpu`); the SM3 one is only checked
+to compile, nothing loads it into D3D9. The four pixel shaders with
 a render check produce the same image as the FXC build (max channel difference
 1.2e-4 on the GPU, float rounding), and the compute shader leaves bit-identical
 buffer contents.
