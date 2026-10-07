@@ -1,0 +1,31 @@
+From 3fd8fd02fdb50257e9d89d92c8a74f83152d4d49 Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Wed, 7 Oct 2026 08:20:31 +0200
+Subject: [PATCH 26/29] vkd3d-shader/hlsl: Let if chains made from switches be
+ flattened.
+
+---
+ libs/vkd3d-shader/hlsl_codegen.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/libs/vkd3d-shader/hlsl_codegen.c b/libs/vkd3d-shader/hlsl_codegen.c
+index f5bc8885..03cc10d2 100644
+--- a/libs/vkd3d-shader/hlsl_codegen.c
++++ b/libs/vkd3d-shader/hlsl_codegen.c
+@@ -7795,7 +7795,12 @@ static bool lower_switch_to_ifs(struct hlsl_ctx *ctx, struct hlsl_ir_node *instr
+         hlsl_block_init(&tail);
+         hlsl_block_add_block(&tail, &chain);
+         hlsl_block_init(&chain);
+-        hlsl_block_add_if(ctx, &chain, cond, &c->body, &tail, HLSL_IF_FORCE_BRANCH, false, &c->loc);
++        /* Left to the usual heuristic: a chain of small cases, such as one
++         * that writes one component of a vector each, becomes selects, as it
++         * does in FXC's output. */
++        hlsl_block_add_if(ctx, &chain, cond, &c->body, &tail,
++                hlsl_tuning_enabled("VKD3D_HLSL_SWITCH_BRANCH", false) ? HLSL_IF_FORCE_BRANCH
++                : HLSL_IF_FLATTEN_DEFAULT, false, &c->loc);
+     }
+ 
+     list_move_before(&instr->entry, &conditions.instrs);
+-- 
+2.53.0
+

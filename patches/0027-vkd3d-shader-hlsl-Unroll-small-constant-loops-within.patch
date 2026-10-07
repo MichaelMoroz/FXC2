@@ -1,0 +1,181 @@
+From 142e99f78bba7aec592914cf0a641402410c1d3d Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Wed, 7 Oct 2026 08:36:42 +0200
+Subject: [PATCH 27/29] vkd3d-shader/hlsl: Unroll small constant loops within
+ an instruction budget.
+
+---
+ libs/vkd3d-shader/hlsl_codegen.c | 124 +++++++++++++++++++++++++++++--
+ 1 file changed, 117 insertions(+), 7 deletions(-)
+
+diff --git a/libs/vkd3d-shader/hlsl_codegen.c b/libs/vkd3d-shader/hlsl_codegen.c
+index 03cc10d2..6b9a4e6f 100644
+--- a/libs/vkd3d-shader/hlsl_codegen.c
++++ b/libs/vkd3d-shader/hlsl_codegen.c
+@@ -17132,7 +17132,10 @@ static bool loop_unrolling_unroll_loop(struct hlsl_ctx *ctx, struct hlsl_block *
+     /* Native will not emit an error if max_iterations has been reached with an
+      * explicit limit. It also will not insert a loop if there are iterations left
+      * i.e [unroll(4)] for (i = 0; i < 8; ++i)) */
+-    if (!unroll_limit && i == max_iterations)
++    /* fxc2: a limit that did not come from an [unroll(n)] in the source is
++     * only how far we were willing to try; running into it must leave the
++     * loop alone, not cut it short. */
++    if ((!unroll_limit || !loop->unroll_limit.node) && i == max_iterations)
+     {
+         if (loop->unroll_type == HLSL_LOOP_FORCE_UNROLL)
+             hlsl_error(ctx, &loop->node.loc, VKD3D_SHADER_ERROR_HLSL_FAILED_FORCED_UNROLL,
+@@ -17161,6 +17164,82 @@ fail:
+     return false;
+ }
+ 
++/* fxc2: instructions in a block, nested blocks included. */
++static unsigned int unroll_block_size(const struct hlsl_block *block)
++{
++    const struct hlsl_ir_node *instr;
++    unsigned int size = 0;
++
++    LIST_FOR_EACH_ENTRY(instr, &block->instrs, struct hlsl_ir_node, entry)
++    {
++        if (instr->type != HLSL_IR_CONSTANT)
++            ++size;
++        if (instr->type == HLSL_IR_IF)
++        {
++            size += unroll_block_size(&hlsl_ir_if(instr)->then_block);
++            size += unroll_block_size(&hlsl_ir_if(instr)->else_block);
++        }
++        else if (instr->type == HLSL_IR_LOOP)
++        {
++            size += unroll_block_size(&hlsl_ir_loop(instr)->body);
++            size += unroll_block_size(&hlsl_ir_loop(instr)->iter);
++        }
++        else if (instr->type == HLSL_IR_SWITCH)
++        {
++            const struct hlsl_ir_switch_case *c;
++
++            LIST_FOR_EACH_ENTRY(c, &hlsl_ir_switch(instr)->cases, struct hlsl_ir_switch_case, entry)
++                size += unroll_block_size(&c->body);
++        }
++    }
++    return size;
++}
++
++/* fxc2: an attempt to unroll costs a pass over everything before the loop,
++ * so only try loops whose condition compares local variables with
++ * constants ("i < 6"), not ones bounded by uniforms or by data. */
++static bool loop_condition_is_countable(const struct hlsl_ir_node *node, unsigned int depth, bool *has_constant)
++{
++    unsigned int i;
++
++    if (node->type == HLSL_IR_CONSTANT)
++    {
++        *has_constant = true;
++        return true;
++    }
++    if (node->type == HLSL_IR_LOAD)
++    {
++        const struct hlsl_ir_var *var = hlsl_ir_load(node)->src.var;
++
++        return !var->is_uniform && !var->is_input_semantic && !var->is_tgsm
++                && node->data_type->class <= HLSL_CLASS_VECTOR;
++    }
++    if (node->type == HLSL_IR_SWIZZLE)
++        return depth < 6 && loop_condition_is_countable(hlsl_ir_swizzle(node)->val.node, depth + 1, has_constant);
++    if (node->type != HLSL_IR_EXPR || depth >= 6)
++        return false;
++    for (i = 0; i < HLSL_MAX_OPERANDS && hlsl_ir_expr(node)->operands[i].node; ++i)
++    {
++        if (!loop_condition_is_countable(hlsl_ir_expr(node)->operands[i].node, depth + 1, has_constant))
++            return false;
++    }
++    return true;
++}
++
++static bool loop_looks_countable(const struct hlsl_ir_loop *loop)
++{
++    const struct hlsl_ir_node *instr;
++    bool has_constant = false;
++
++    LIST_FOR_EACH_ENTRY(instr, &loop->body.instrs, struct hlsl_ir_node, entry)
++    {
++        if (instr->type == HLSL_IR_IF && hlsl_ir_if(instr)->is_loop_conditional)
++            return loop_condition_is_countable(hlsl_ir_if(instr)->condition.node, 0, &has_constant)
++                    && has_constant;
++    }
++    return false;
++}
++
+ static bool unroll_loops(struct hlsl_ctx *ctx, struct hlsl_ir_node *node, void *context)
+ {
+     struct hlsl_block *program = context;
+@@ -17175,15 +17254,36 @@ static bool unroll_loops(struct hlsl_ctx *ctx, struct hlsl_ir_node *node, void *
+     if (loop->unroll_type == HLSL_LOOP_FORCE_LOOP)
+         return false;
+ 
+-    /* fxc2: speculatively unrolling every loop, as upstream does to mimic
+-     * FXC, makes compile time and code size explode on loop-heavy SM4+
+-     * shaders. Only unroll loops marked [unroll], unless the
+-     * VKD3D_HLSL_IMPLICIT_UNROLL_LIMIT environment variable sets a limit. */
++    /* fxc2: speculatively unrolling every loop up to 254 iterations, as
++     * upstream does to mimic FXC, makes compile time and code size explode on
++     * loop-heavy SM4+ shaders: the unroller does not know the trip count, it
++     * just copies the body until the copies stop being reachable. On the
++     * other hand "for (i = 0; i < 6; ++i) a[i] = ..." is much better off
++     * unrolled: no loop, and the array stays in registers. So give each loop
++     * a budget of instructions and try only as many iterations as fit in it,
++     * which leaves big bodies alone entirely. Loops marked [unroll] are
++     * unrolled as asked. VKD3D_HLSL_IMPLICIT_UNROLL_LIMIT forces an iteration
++     * limit, VKD3D_HLSL_UNROLL_BUDGET sets the budget (0: never). */
+     if (loop->unroll_type != HLSL_LOOP_FORCE_UNROLL && hlsl_version_ge(ctx, 4, 0))
+     {
+         const char *limit = getenv("VKD3D_HLSL_IMPLICIT_UNROLL_LIMIT");
++        const char *budget_env = getenv("VKD3D_HLSL_UNROLL_BUDGET");
++        unsigned int budget = budget_env ? strtoul(budget_env, NULL, 0) : 400;
++        unsigned int size;
++
++        if (limit)
++        {
++            unroll_limit = strtoul(limit, NULL, 0);
++        }
++        else if (budget && loop_looks_countable(loop))
++        {
++            size = max(unroll_block_size(&loop->body) + unroll_block_size(&loop->iter), 1);
++            unroll_limit = min(budget / size, 64);
++            if (unroll_limit < 2)
++                unroll_limit = 0;
++        }
+ 
+-        if (!limit || !(unroll_limit = strtoul(limit, NULL, 0)))
++        if (!unroll_limit)
+         {
+             loop->unroll_type = HLSL_LOOP_FORCE_LOOP;
+             return false;
+@@ -17207,7 +17307,12 @@ static bool unroll_loops(struct hlsl_ctx *ctx, struct hlsl_ir_node *node, void *
+     }
+ 
+     if (!loop_unrolling_unroll_loop(ctx, program, loop, unroll_limit, false))
++    {
++        /* fxc2: nothing changed, so there is no need to fold the whole
++         * program again before looking at the next loop. */
+         loop->unroll_type = HLSL_LOOP_FORCE_LOOP;
++        return false;
++    }
+ 
+     return true;
+ }
+@@ -17333,7 +17438,12 @@ static void loop_unrolling_execute(struct hlsl_ctx *ctx, struct hlsl_block *bloc
+     for (;;)
+     {
+         hlsl_run_folding_passes(ctx, block);
+-        if (!hlsl_transform_ir_once(ctx, unroll_loops, block, block))
++        /* fxc2: upstream folds the whole program again after every single
++         * loop it unrolls, which is most of the compile time once more than
++         * a few loops qualify. One loop per nesting level and round is as
++         * good: each attempt propagates constants up to its loop by itself. */
++        if (hlsl_version_ge(ctx, 4, 0) ? !hlsl_transform_ir(ctx, unroll_loops, block, block)
++                : !hlsl_transform_ir_once(ctx, unroll_loops, block, block))
+             break;
+     }
+     if (hlsl_version_has_sm1_loop_support(ctx))
+-- 
+2.53.0
+

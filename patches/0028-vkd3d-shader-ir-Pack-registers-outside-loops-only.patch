@@ -1,0 +1,138 @@
+From 0209f2e59d492f8f5daf7d24a507dcc1ea180d73 Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Wed, 7 Oct 2026 08:54:42 +0200
+Subject: [PATCH 28/29] vkd3d-shader/ir: Pack registers outside loops only.
+
+---
+ libs/vkd3d-shader/ir.c | 56 +++++++++++++++++++++++++++++++++---------
+ 1 file changed, 45 insertions(+), 11 deletions(-)
+
+diff --git a/libs/vkd3d-shader/ir.c b/libs/vkd3d-shader/ir.c
+index 0e8b2c69..ee2af2ee 100644
+--- a/libs/vkd3d-shader/ir.c
++++ b/libs/vkd3d-shader/ir.c
+@@ -11879,10 +11879,14 @@ struct liveness_tracker
+     {
+         bool written;
+         bool fixed_mask;
++        /* fxc2: read or written inside a loop. */
++        bool in_loop;
+         uint8_t mask;
+         unsigned int interior_loop_start, interior_loop_depth;
+         unsigned int first_write, last_access, last_read;
+     } *ssa_regs, *temp_regs;
++    /* fxc2: whether the instruction being tracked is inside a loop. */
++    bool in_loop;
+ };
+ 
+ static void liveness_track_src(struct liveness_tracker *tracker, struct vsir_src_operand *src, unsigned int index)
+@@ -11904,6 +11908,8 @@ static void liveness_track_src(struct liveness_tracker *tracker, struct vsir_src
+ 
+     reg->last_read = index;
+     reg->last_access = index;
++    if (tracker->in_loop)
++        reg->in_loop = true;
+     if (!reg->written)
+     {
+         WARN("Register %s%u used uninitialised in instruction %u. Recording implicit write.\n",
+@@ -11937,6 +11943,8 @@ static void liveness_track_dst(struct liveness_tracker *tracker, struct vsir_dst
+     reg->last_access = index;
+     reg->written = true;
+     reg->mask |= dst->write_mask;
++    if (tracker->in_loop)
++        reg->in_loop = true;
+ 
+     /* fxc2: anything holding a double, however it is written. */
+     if (dst->reg.data_type == VSIR_DATA_F64)
+@@ -12126,6 +12134,7 @@ static enum vkd3d_result track_liveness(struct vsir_program *program, struct liv
+             }
+         }
+ 
++        tracker->in_loop = !!loop_depth;
+         for (unsigned int j = 0; j < ins->dst_count; ++j)
+             liveness_track_dst(tracker, &ins->dst[j], i, &program->shader_version, ins->opcode);
+         for (unsigned int j = 0; j < ins->src_count; ++j)
+@@ -12337,20 +12346,37 @@ static const char *debug_temp_allocator_reg(const struct temp_allocator_reg *reg
+ }
+ 
+ /* fxc2: whether values that are live at the same time may share the
+- * components of one register. Packing keeps the register count down, but a
+- * driver that tracks registers as whole vectors then sees every write to one
+- * value as a change to its neighbours. Controlled by VKD3D_PACK_REGISTERS. */
+-static bool temp_allocator_pack_registers(void)
++ * components of one register.
++ *
++ * Packing keeps the register count down and suits straight-line code. In a
++ * loop it is costly on drivers that track registers as whole vectors: every
++ * write to one value looks like a change to its neighbours, which then have to
++ * be carried around the loop and merged after every branch with them. On one
++ * large interpreter loop, not packing was worth 17% per iteration, while
++ * packing everything made the code around the loop 7% cheaper. So the default
++ * is to give values used inside a loop a register of their own and pack the
++ * rest. VKD3D_PACK_REGISTERS=1 packs everything, =0 nothing. */
++enum temp_allocator_packing
++{
++    PACK_NEVER,
++    PACK_ALWAYS,
++    PACK_OUTSIDE_LOOPS,
++};
++
++/* Set in current_allocation[] for a register held by a value used in a loop. */
++#define TEMP_ALLOCATION_EXCLUSIVE 0x10
++
++static enum temp_allocator_packing temp_allocator_packing(void)
+ {
+-    static int pack = -1;
++    static int packing = -1;
+ 
+-    if (pack < 0)
++    if (packing < 0)
+     {
+         const char *env = getenv("VKD3D_PACK_REGISTERS");
+ 
+-        pack = env ? !!atoi(env) : 1;
++        packing = !env ? PACK_OUTSIDE_LOOPS : atoi(env) ? PACK_ALWAYS : PACK_NEVER;
+     }
+-    return pack;
++    return packing;
+ }
+ 
+ /* fxc2: with VKD3D_REGISTER_SPREAD=<n>, free registers are handed out in
+@@ -12386,9 +12412,13 @@ static void temp_allocator_open_register(struct temp_allocator *allocator, struc
+     {
+         const uint8_t available_mask = ~current_allocation[i = k < spread ? (cursor + k) % spread : k] & 0xf;
+ 
+-        /* fxc2: see temp_allocator_pack_registers(). */
+-        if (!temp_allocator_pack_registers() && available_mask != 0xf)
+-            continue;
++        /* fxc2: see temp_allocator_packing(). */
++        if (available_mask != 0xf || (current_allocation[i] & TEMP_ALLOCATION_EXCLUSIVE))
++        {
++            if (temp_allocator_packing() == PACK_NEVER || (current_allocation[i] & TEMP_ALLOCATION_EXCLUSIVE)
++                    || (temp_allocator_packing() == PACK_OUTSIDE_LOOPS && liveness_reg->in_loop))
++                continue;
++        }
+ 
+         if (liveness_reg->fixed_mask)
+         {
+@@ -12437,6 +12467,8 @@ static void temp_allocator_open_register(struct temp_allocator *allocator, struc
+     }
+ 
+     VKD3D_ASSERT(k < reg_count);
++    if (temp_allocator_packing() == PACK_OUTSIDE_LOOPS && liveness_reg->in_loop)
++        current_allocation[i] |= TEMP_ALLOCATION_EXCLUSIVE;
+     if (spread)
+         cursor = (i + 1) % spread;
+ }
+@@ -12452,6 +12484,8 @@ static void temp_allocator_close_register(struct temp_allocator *allocator, stru
+             debug_temp_allocator_reg(reg), liveness_reg->first_write, liveness_reg->last_access);
+ 
+     allocator->current_allocation[reg->temp_id] &= ~reg->allocated_mask;
++    if (!(allocator->current_allocation[reg->temp_id] & 0xf))
++        allocator->current_allocation[reg->temp_id] = 0;
+ }
+ 
+ /* Compute the allocation map. Each register is modeled as a time interval
+-- 
+2.53.0
+

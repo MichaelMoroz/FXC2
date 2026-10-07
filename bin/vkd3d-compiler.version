@@ -21,3 +21,10 @@ vkd3d-2.1-93-gcfcb4833
 0020-vkd3d-shader-hlsl-Lower-switches-without-forcecase-t.patch
 0021-vkd3d-shader-hlsl-Make-the-if-flattening-threshold-t.patch
 0022-vkd3d-shader-hlsl-Continue-in-the-else-branch-after-.patch
+0023-vkd3d-shader-hlsl-Do-not-flatten-branches-that-acces.patch
+0024-vkd3d-shader-hlsl-Duplicate-small-tails-instead-of-t.patch
+0025-vkd3d-shader-ir-Optional-round-robin-register-alloca.patch
+0026-vkd3d-shader-hlsl-Let-if-chains-made-from-switches-b.patch
+0027-vkd3d-shader-hlsl-Unroll-small-constant-loops-within.patch
+0028-vkd3d-shader-ir-Pack-registers-outside-loops-only.patch
+0029-vkd3d-shader-hlsl-Turn-switches-that-return-into-if-.patch

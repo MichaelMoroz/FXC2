@@ -1,0 +1,167 @@
+From 5a11e2c59f226f71d89a97c81b85bfd5e8e74ea1 Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Wed, 7 Oct 2026 09:22:21 +0200
+Subject: [PATCH 29/29] vkd3d-shader/hlsl: Turn switches that return into if
+ chains before lowering returns.
+
+---
+ libs/vkd3d-shader/hlsl_codegen.c | 76 ++++++++++++++++++++++++++------
+ 1 file changed, 63 insertions(+), 13 deletions(-)
+
+diff --git a/libs/vkd3d-shader/hlsl_codegen.c b/libs/vkd3d-shader/hlsl_codegen.c
+index 6b9a4e6f..6a2f5f22 100644
+--- a/libs/vkd3d-shader/hlsl_codegen.c
++++ b/libs/vkd3d-shader/hlsl_codegen.c
+@@ -1190,6 +1190,7 @@ static bool block_always_returns(const struct hlsl_block *block)
+ }
+ 
+ static bool hlsl_tuning_enabled(const char *variable, bool default_value);
++static struct hlsl_ir_node *switch_to_ifs(struct hlsl_ctx *ctx, struct hlsl_ir_node *instr);
+ 
+ /* fxc2: number of instructions in a block, nested ones included, up to a
+  * limit: for deciding whether code is small enough to be duplicated. */
+@@ -1226,7 +1227,7 @@ static unsigned int return_duplication_limit(void)
+     {
+         const char *env = getenv("VKD3D_HLSL_RETURN_DUP");
+ 
+-        limit = env ? atoi(env) : 24;
++        limit = env ? atoi(env) : 200;
+     }
+     return limit;
+ }
+@@ -1279,6 +1280,22 @@ static bool lower_return(struct hlsl_ctx *ctx, struct hlsl_ir_function_decl *fun
+ 
+     LIST_FOR_EACH_ENTRY_SAFE(instr, next, &block->instrs, struct hlsl_ir_node, entry)
+     {
++        /* fxc2: a return inside a switch case otherwise needs a flag, a break
++         * and a test after the switch. As a chain of ifs it is handled like
++         * any other return in an if, usually with none of the three. */
++        if (instr->type == HLSL_IR_SWITCH && hlsl_version_ge(ctx, 4, 0)
++                && hlsl_tuning_enabled("VKD3D_HLSL_RETURN_SWITCH", true))
++        {
++            struct hlsl_ir_switch_case *c;
++            struct hlsl_ir_node *chain;
++            bool returns = false;
++
++            LIST_FOR_EACH_ENTRY(c, &hlsl_ir_switch(instr)->cases, struct hlsl_ir_switch_case, entry)
++                returns |= block_contains_return(&c->body);
++            if (returns && (chain = switch_to_ifs(ctx, instr)))
++                instr = chain;
++        }
++
+         if (instr->type == HLSL_IR_CALL)
+         {
+             struct hlsl_ir_call *call = hlsl_ir_call(instr);
+@@ -7698,26 +7715,36 @@ static bool switch_block_has_inner_break(const struct hlsl_block *block, bool to
+     return false;
+ }
+ 
+-static bool lower_switch_to_ifs(struct hlsl_ctx *ctx, struct hlsl_ir_node *instr, void *context)
++static struct hlsl_ir_node *switch_to_ifs(struct hlsl_ctx *ctx, struct hlsl_ir_node *instr)
+ {
+     struct hlsl_type *bool_type = hlsl_get_scalar_type(ctx, HLSL_TYPE_BOOL);
+     struct hlsl_ir_switch_case *c, *default_case = NULL;
+     struct hlsl_block chain, conditions, tail;
+-    struct hlsl_ir_node *selector, *cond;
++    struct hlsl_ir_node *selector, *cond, *result;
+     struct hlsl_ir_switch *s;
+-    bool pending_default;
++    bool pending_default, has_if = false;
+ 
+     if (instr->type != HLSL_IR_SWITCH)
+-        return false;
++        return NULL;
+     s = hlsl_ir_switch(instr);
+     if (s->force_case)
+-        return false;
++        return NULL;
+     selector = s->selector.node;
+ 
+     LIST_FOR_EACH_ENTRY(c, &s->cases, struct hlsl_ir_switch_case, entry)
+     {
++        const struct hlsl_ir_node *last;
++
+         if (switch_block_has_inner_break(&c->body, true))
+-            return false;
++            return NULL;
++        if (list_empty(&c->body.instrs))
++            continue;
++        /* Every case has to end in a break, or, when this runs before
++         * returns have been lowered, return on every path. */
++        last = LIST_ENTRY(list_tail(&c->body.instrs), struct hlsl_ir_node, entry);
++        if (!(last->type == HLSL_IR_JUMP && hlsl_ir_jump(last)->type == HLSL_IR_JUMP_BREAK)
++                && !block_always_returns(&c->body))
++            return NULL;
+     }
+ 
+     /* The case that the default label falls through to (or is). */
+@@ -7733,6 +7760,15 @@ static bool lower_switch_to_ifs(struct hlsl_ctx *ctx, struct hlsl_ir_node *instr
+         }
+     }
+ 
++    /* Without a case to test for there is no if to make. */
++    LIST_FOR_EACH_ENTRY(c, &s->cases, struct hlsl_ir_switch_case, entry)
++    {
++        if (c != default_case && !c->is_default && !list_empty(&c->body.instrs))
++            has_if = true;
++    }
++    if (!has_if)
++        return NULL;
++
+     /* All comparisons first, then the chain, built from its far end:
+      *     if (c0) body0 else if (c1) body1 ... else default.
+      * A case consisting of just "break" still needs its (empty) branch, so
+@@ -7743,8 +7779,11 @@ static bool lower_switch_to_ifs(struct hlsl_ctx *ctx, struct hlsl_ir_node *instr
+     {
+         struct hlsl_ir_node *last = LIST_ENTRY(list_tail(&default_case->body.instrs), struct hlsl_ir_node, entry);
+ 
+-        list_remove(&last->entry);
+-        hlsl_free_instr(last);
++        if (last->type == HLSL_IR_JUMP && hlsl_ir_jump(last)->type == HLSL_IR_JUMP_BREAK)
++        {
++            list_remove(&last->entry);
++            hlsl_free_instr(last);
++        }
+         hlsl_block_add_block(&chain, &default_case->body);
+     }
+ 
+@@ -7787,9 +7826,11 @@ static bool lower_switch_to_ifs(struct hlsl_ctx *ctx, struct hlsl_ir_node *instr
+         }
+ 
+         last = LIST_ENTRY(list_tail(&c->body.instrs), struct hlsl_ir_node, entry);
+-        VKD3D_ASSERT(last->type == HLSL_IR_JUMP && hlsl_ir_jump(last)->type == HLSL_IR_JUMP_BREAK);
+-        list_remove(&last->entry);
+-        hlsl_free_instr(last);
++        if (last->type == HLSL_IR_JUMP && hlsl_ir_jump(last)->type == HLSL_IR_JUMP_BREAK)
++        {
++            list_remove(&last->entry);
++            hlsl_free_instr(last);
++        }
+ 
+         cond = eq;
+         hlsl_block_init(&tail);
+@@ -7803,11 +7844,20 @@ static bool lower_switch_to_ifs(struct hlsl_ctx *ctx, struct hlsl_ir_node *instr
+                 : HLSL_IF_FLATTEN_DEFAULT, false, &c->loc);
+     }
+ 
++    /* The chain is a single if, with everything else inside it. */
++    result = LIST_ENTRY(list_head(&chain.instrs), struct hlsl_ir_node, entry);
++    VKD3D_ASSERT(result->type == HLSL_IR_IF);
++
+     list_move_before(&instr->entry, &conditions.instrs);
+     list_move_before(&instr->entry, &chain.instrs);
+     list_remove(&instr->entry);
+     hlsl_free_instr(instr);
+-    return true;
++    return result;
++}
++
++static bool lower_switch_to_ifs(struct hlsl_ctx *ctx, struct hlsl_ir_node *instr, void *context)
++{
++    return !!switch_to_ifs(ctx, instr);
+ }
+ 
+ static bool mark_indexable_var(struct hlsl_ctx *ctx, struct hlsl_deref *deref,
+-- 
+2.53.0
+

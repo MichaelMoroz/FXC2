@@ -1,0 +1,60 @@
+From ac3d162b44295604d4373427ddc2a56a09925689 Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Wed, 7 Oct 2026 08:11:31 +0200
+Subject: [PATCH 23/29] vkd3d-shader/hlsl: Do not flatten branches that access
+ arrays with a run-time index.
+
+---
+ libs/vkd3d-shader/hlsl_codegen.c | 23 +++++++++++++++++++++++
+ 1 file changed, 23 insertions(+)
+
+diff --git a/libs/vkd3d-shader/hlsl_codegen.c b/libs/vkd3d-shader/hlsl_codegen.c
+index 9c940b84..9c341996 100644
+--- a/libs/vkd3d-shader/hlsl_codegen.c
++++ b/libs/vkd3d-shader/hlsl_codegen.c
+@@ -5152,6 +5152,20 @@ static unsigned int flatten_max_cost(void)
+     return cost;
+ }
+ 
++/* fxc2: whether a deref indexes an array with a run-time value, which means
++ * the variable lives in memory (an indexable temp) rather than in registers. */
++static bool deref_has_dynamic_index(const struct hlsl_deref *deref)
++{
++    unsigned int i;
++
++    for (i = 0; i < deref->path_len; ++i)
++    {
++        if (deref->path[i].node->type != HLSL_IR_CONSTANT)
++            return true;
++    }
++    return false;
++}
++
+ static bool is_conditional_block_simple(const struct hlsl_block *cond_block)
+ {
+     const unsigned int max_cost = flatten_max_cost();
+@@ -5187,12 +5201,21 @@ static bool is_conditional_block_simple(const struct hlsl_block *cond_block)
+             case HLSL_IR_STORE:
+                 if (hlsl_ir_store(instr)->lhs.var->is_tgsm)
+                     return false;
++                /* fxc2: flattening "if (c) a[i] = x;" makes it an
++                 * unconditional read, select and write of memory, which is
++                 * far more expensive than the branch it replaces. */
++                if (deref_has_dynamic_index(&hlsl_ir_store(instr)->lhs)
++                        && hlsl_tuning_enabled("VKD3D_HLSL_KEEP_ARRAY_BRANCHES", true))
++                    return false;
+                 ++cost;
+                 break;
+ 
+             case HLSL_IR_LOAD:
+                 if (hlsl_ir_load(instr)->src.var->is_tgsm)
+                     return false;
++                if (deref_has_dynamic_index(&hlsl_ir_load(instr)->src)
++                        && hlsl_tuning_enabled("VKD3D_HLSL_KEEP_ARRAY_BRANCHES", true))
++                    return false;
+                 break;
+ 
+             default:
+-- 
+2.53.0
+

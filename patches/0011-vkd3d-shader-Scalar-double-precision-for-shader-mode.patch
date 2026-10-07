@@ -1,7 +1,7 @@
 From 5703442aebc8c0d4ee903480ef69c2f31635d592 Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 07:21:22 +0200
-Subject: [PATCH 11/22] vkd3d-shader: Scalar double precision for shader model
+Subject: [PATCH 11/29] vkd3d-shader: Scalar double precision for shader model
  5.
 
 ---
