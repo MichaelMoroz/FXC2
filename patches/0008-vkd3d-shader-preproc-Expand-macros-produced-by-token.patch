@@ -1,0 +1,96 @@
+From d6bcf754229e0240c9b481d1344513ee84c4e101 Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Wed, 7 Oct 2026 07:04:04 +0200
+Subject: [PATCH 08/11] vkd3d-shader/preproc: Expand macros produced by token
+ pasting.
+
+---
+ libs/vkd3d-shader/preproc.h |  2 ++
+ libs/vkd3d-shader/preproc.l | 55 +++++++++++++++++++++++++++++++++++++
+ 2 files changed, 57 insertions(+)
+
+diff --git a/libs/vkd3d-shader/preproc.h b/libs/vkd3d-shader/preproc.h
+index 47979761..7dd530c4 100644
+--- a/libs/vkd3d-shader/preproc.h
++++ b/libs/vkd3d-shader/preproc.h
+@@ -127,6 +127,8 @@ struct preproc_ctx
+ 
+     bool last_was_newline;
+     bool last_was_defined;
++    /* fxc2: a ## was just seen; its right-hand side is next. */
++    bool concat_pending;
+ 
+     bool error;
+ };
+diff --git a/libs/vkd3d-shader/preproc.l b/libs/vkd3d-shader/preproc.l
+index 9b7760eb..020db924 100644
+--- a/libs/vkd3d-shader/preproc.l
++++ b/libs/vkd3d-shader/preproc.l
+@@ -542,9 +542,64 @@ int yylex(YYSTYPE *lval, YYLTYPE *lloc, yyscan_t scanner)
+                     while (ctx->buffer.content_size
+                             && strchr(" \t\r\n", ctx->buffer.buffer[ctx->buffer.content_size - 1]))
+                         --ctx->buffer.content_size;
++                    ctx->concat_pending = !ctx->current_directive;
+                     break;
+                 }
+ 
++                /* fxc2: the token produced by ## has to be looked up as a
++                 * macro itself (#define GET(x) (v >> SHIFT_##x)). Output is
++                 * written as it goes, so the left-hand side is already in the
++                 * buffer: take it back out when the pasted name is a macro. */
++                if (ctx->concat_pending && !ctx->current_directive)
++                {
++                    if (isspace(text[0]))
++                        continue;
++
++                    if (!((token == T_IDENTIFIER || token == T_IDENTIFIER_PAREN) && find_arg_expansion(ctx, text)))
++                    {
++                        size_t start = ctx->buffer.content_size, left_len, i;
++                        struct preproc_macro *macro = NULL;
++                        bool pastable = true;
++                        char name[256];
++
++                        ctx->concat_pending = false;
++
++                        for (i = 0; text[i]; ++i)
++                        {
++                            if (!isalnum((unsigned char)text[i]) && text[i] != '_')
++                                pastable = false;
++                        }
++                        while (start && (isalnum((unsigned char)ctx->buffer.buffer[start - 1])
++                                || ctx->buffer.buffer[start - 1] == '_'))
++                            --start;
++                        left_len = ctx->buffer.content_size - start;
++
++                        if (pastable && left_len && !isdigit((unsigned char)ctx->buffer.buffer[start])
++                                && left_len + strlen(text) < sizeof(name))
++                        {
++                            memcpy(name, &ctx->buffer.buffer[start], left_len);
++                            strcpy(name + left_len, text);
++                            macro = preproc_find_macro(ctx, name);
++                        }
++
++                        if (macro)
++                        {
++                            ctx->buffer.content_size = start;
++                            ctx->buffer.buffer[start] = 0;
++                            if (!macro->arg_count)
++                            {
++                                preproc_push_expansion(ctx, &macro->body, macro, NULL);
++                            }
++                            else
++                            {
++                                func_state->state = STATE_IDENTIFIER;
++                                func_state->macro = macro;
++                            }
++                            continue;
++                        }
++                    }
++                }
++
+                 if (token == T_HASHSTRING)
+                 {
+                     struct vkd3d_string_buffer buffer;
+-- 
+2.53.0
+

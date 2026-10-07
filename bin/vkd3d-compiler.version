@@ -6,3 +6,7 @@ vkd3d-2.1-93-gcfcb4833
 0005-vkd3d-shader-hlsl-Negate-bools-as-ints.patch
 0006-vkd3d-shader-hlsl-Emulate-firstbithigh-and-firstbitl.patch
 0007-vkd3d-shader-hlsl-Bound-the-recursion-of-evaluate_co.patch
+0008-vkd3d-shader-preproc-Expand-macros-produced-by-token.patch
+0009-vkd3d-shader-hlsl-Accept-attributes-on-plain-stateme.patch
+0010-vkd3d-shader-hlsl-Lower-stores-to-a-vector-component.patch
+0011-vkd3d-shader-Scalar-double-precision-for-shader-mode.patch

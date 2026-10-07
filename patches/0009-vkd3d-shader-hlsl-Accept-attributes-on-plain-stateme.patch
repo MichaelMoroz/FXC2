@@ -1,0 +1,81 @@
+From 98abe27892ef80a02a7612bf699c4afe5083b218 Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Wed, 7 Oct 2026 07:06:51 +0200
+Subject: [PATCH 09/11] vkd3d-shader/hlsl: Accept attributes on plain
+ statements and switch cases ending in an if that always leaves.
+
+---
+ libs/vkd3d-shader/hlsl.y         | 12 ++++++++++++
+ libs/vkd3d-shader/hlsl_codegen.c | 26 ++++++++++++++++++++++++++
+ 2 files changed, 38 insertions(+)
+
+diff --git a/libs/vkd3d-shader/hlsl.y b/libs/vkd3d-shader/hlsl.y
+index 8bd3d583..062a249f 100644
+--- a/libs/vkd3d-shader/hlsl.y
++++ b/libs/vkd3d-shader/hlsl.y
+@@ -9435,6 +9435,18 @@ statement_list:
+ statement:
+       declaration_statement
+     | expr_statement
++    /* fxc2: FXC accepts and ignores attributes such as [branch] in front of
++     * statements they mean nothing for. */
++    | attribute_list declaration_statement
++        {
++            cleanup_parse_attribute_list(&$1);
++            $$ = $2;
++        }
++    | attribute_list expr_statement
++        {
++            cleanup_parse_attribute_list(&$1);
++            $$ = $2;
++        }
+     | scope_start compound_statement
+         {
+             hlsl_pop_scope(ctx);
+diff --git a/libs/vkd3d-shader/hlsl_codegen.c b/libs/vkd3d-shader/hlsl_codegen.c
+index 4cf6c2dc..1e40a379 100644
+--- a/libs/vkd3d-shader/hlsl_codegen.c
++++ b/libs/vkd3d-shader/hlsl_codegen.c
+@@ -5357,6 +5357,26 @@ static bool flatten_conditional_branches(struct hlsl_ctx *ctx, struct hlsl_ir_no
+     return true;
+ }
+ 
++/* fxc2: a case may also end in an if whose branches both leave it, as in
++ * "case 1: if (x) return a; else break;". */
++static bool block_ends_with_break(const struct hlsl_block *block)
++{
++    const struct hlsl_ir_node *node;
++
++    if (list_empty(&block->instrs))
++        return false;
++    node = LIST_ENTRY(list_tail(&block->instrs), struct hlsl_ir_node, entry);
++    if (node->type == HLSL_IR_JUMP)
++        return hlsl_ir_jump(node)->type == HLSL_IR_JUMP_BREAK;
++    if (node->type == HLSL_IR_IF)
++    {
++        const struct hlsl_ir_if *iff = hlsl_ir_if(node);
++
++        return block_ends_with_break(&iff->then_block) && block_ends_with_break(&iff->else_block);
++    }
++    return false;
++}
++
+ static bool normalize_switch_cases(struct hlsl_ctx *ctx, struct hlsl_ir_node *instr, void *context)
+ {
+     struct hlsl_ir_switch_case *c, *def = NULL;
+@@ -5381,6 +5401,12 @@ static bool normalize_switch_cases(struct hlsl_ctx *ctx, struct hlsl_ir_node *in
+             node = LIST_ENTRY(list_tail(&c->body.instrs), struct hlsl_ir_node, entry);
+             if (node->type == HLSL_IR_JUMP)
+                 terminal_break = (hlsl_ir_jump(node)->type == HLSL_IR_JUMP_BREAK);
++            else if (block_ends_with_break(&c->body))
++            {
++                /* Give the block the shape the rest of the compiler expects. */
++                hlsl_block_add_jump(ctx, &c->body, HLSL_IR_JUMP_BREAK, NULL, &c->loc);
++                terminal_break = true;
++            }
+         }
+ 
+         missing_terminal_break |= !terminal_break;
+-- 
+2.53.0
+

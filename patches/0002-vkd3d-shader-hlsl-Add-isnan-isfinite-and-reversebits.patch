@@ -1,7 +1,7 @@
 From bf0ea6a1a154f7bdee98b8f91d8d4117888d2247 Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 04:54:00 +0200
-Subject: [PATCH 2/7] vkd3d-shader/hlsl: Add isnan(), isfinite() and
+Subject: [PATCH 02/11] vkd3d-shader/hlsl: Add isnan(), isfinite() and
  reversebits().
 
 ---
