@@ -1,0 +1,64 @@
+From ac50edee4ee6d723f4c53898c6be34deaf39932f Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Wed, 7 Oct 2026 23:49:31 +0200
+Subject: [PATCH 47/47] vkd3d-shader/hlsl: Negate in the type of the
+ subtraction (float minus unsigned).
+
+---
+ libs/vkd3d-shader/hlsl.y | 26 ++++++++++++++++++++++++--
+ 1 file changed, 24 insertions(+), 2 deletions(-)
+
+diff --git a/libs/vkd3d-shader/hlsl.y b/libs/vkd3d-shader/hlsl.y
+index 5b5a528f..1f313a41 100644
+--- a/libs/vkd3d-shader/hlsl.y
++++ b/libs/vkd3d-shader/hlsl.y
+@@ -1739,6 +1739,28 @@ static struct hlsl_ir_node *add_unary_arithmetic_expr(struct hlsl_ctx *ctx, stru
+     return add_expr(ctx, block, op, args, arg->data_type, loc);
+ }
+ 
++/* fxc2: -rhs for "lhs - rhs" and "lhs -= rhs". The negation has to happen in
++ * the type the subtraction is done in: an unsigned or boolean rhs under a
++ * floating point lhs is converted first. (Between integers it makes no
++ * difference: the arithmetic wraps the same either way.) */
++static struct hlsl_ir_node *add_negation_for_subtraction(struct hlsl_ctx *ctx, struct hlsl_block *block,
++        const struct hlsl_type *lhs_type, struct hlsl_ir_node *rhs, const struct vkd3d_shader_location *loc)
++{
++    const struct hlsl_type *rhs_type = rhs->data_type;
++
++    if (hlsl_is_numeric_type(lhs_type) && hlsl_is_numeric_type(rhs_type)
++            && (lhs_type->e.numeric.type == HLSL_TYPE_FLOAT || lhs_type->e.numeric.type == HLSL_TYPE_HALF
++            || lhs_type->e.numeric.type == HLSL_TYPE_DOUBLE)
++            && hlsl_type_is_integer(rhs_type))
++    {
++        struct hlsl_type *type = hlsl_change_base_type(ctx, rhs_type, lhs_type->e.numeric.type);
++
++        if (!(rhs = add_implicit_conversion(ctx, block, rhs, type, loc)))
++            return NULL;
++    }
++    return add_unary_arithmetic_expr(ctx, block, HLSL_OP1_NEG, rhs, loc);
++}
++
+ static struct hlsl_ir_node *add_unary_bitwise_expr(struct hlsl_ctx *ctx, struct hlsl_block *block,
+         enum hlsl_ir_expr_op op, struct hlsl_ir_node *arg, const struct vkd3d_shader_location *loc)
+ {
+@@ -2188,7 +2210,7 @@ static bool add_assignment(struct hlsl_ctx *ctx, struct hlsl_block *block, struc
+ 
+     if (assign_op == ASSIGN_OP_SUB)
+     {
+-        if (!(rhs = add_unary_arithmetic_expr(ctx, block, HLSL_OP1_NEG, rhs, &rhs->loc)))
++        if (!(rhs = add_negation_for_subtraction(ctx, block, lhs->data_type, rhs, &rhs->loc)))
+             return false;
+         assign_op = ASSIGN_OP_ADD;
+     }
+@@ -10527,7 +10549,7 @@ add_expr:
+         {
+             struct hlsl_ir_node *neg;
+ 
+-            if (!(neg = add_unary_arithmetic_expr(ctx, $3, HLSL_OP1_NEG, node_from_block($3), &@2)))
++            if (!(neg = add_negation_for_subtraction(ctx, $3, node_from_block($1)->data_type, node_from_block($3), &@2)))
+                 YYABORT;
+             $$ = add_binary_expr_merge(ctx, $1, $3, HLSL_OP2_ADD, &@2);
+         }
+-- 
+2.53.0
+

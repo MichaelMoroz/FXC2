@@ -1,0 +1,56 @@
+From 2b6c0d248e95c3850168273bb69428eef28fe504 Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Wed, 7 Oct 2026 23:43:41 +0200
+Subject: [PATCH 46/47] vkd3d-shader: Accept the l suffix on floating point
+ literals.
+
+---
+ libs/vkd3d-shader/hlsl.l    | 6 +++---
+ libs/vkd3d-shader/preproc.l | 6 +++---
+ 2 files changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/libs/vkd3d-shader/hlsl.l b/libs/vkd3d-shader/hlsl.l
+index 85f0d89a..9896275d 100644
+--- a/libs/vkd3d-shader/hlsl.l
++++ b/libs/vkd3d-shader/hlsl.l
+@@ -241,17 +241,17 @@ while                   {return KW_WHILE;               }
+                             return STRING;
+                         }
+ 
+-[0-9]*\.[0-9]+([eE][+-]?[0-9]+)?[h|H|f|F]? {
++[0-9]*\.[0-9]+([eE][+-]?[0-9]+)?[h|H|f|F|l|L]? {
+                             struct hlsl_ctx *ctx = yyget_extra(yyscanner);
+                             yylval->floatval = vkd3d_parse_float(yytext, ctx->c_locale);
+                             return C_FLOAT;
+                         }
+-[0-9]+\.([eE][+-]?[0-9]+)?[h|H|f|F]? {
++[0-9]+\.([eE][+-]?[0-9]+)?[h|H|f|F|l|L]? {
+                             struct hlsl_ctx *ctx = yyget_extra(yyscanner);
+                             yylval->floatval = vkd3d_parse_float(yytext, ctx->c_locale);
+                             return C_FLOAT;
+                         }
+-[0-9]+[eE][+-]?[0-9]+[h|H|f|F]? {
++[0-9]+[eE][+-]?[0-9]+[h|H|f|F|l|L]? {
+                             struct hlsl_ctx *ctx = yyget_extra(yyscanner);
+                             yylval->floatval = vkd3d_parse_float(yytext, ctx->c_locale);
+                             return C_FLOAT;
+diff --git a/libs/vkd3d-shader/preproc.l b/libs/vkd3d-shader/preproc.l
+index 6986b629..d06ade18 100644
+--- a/libs/vkd3d-shader/preproc.l
++++ b/libs/vkd3d-shader/preproc.l
+@@ -108,9 +108,9 @@ INT_SUFFIX      [uUlL]{0,2}
+ 
+     /* We have no use for floats, but shouldn't parse them as integers. */
+ 
+-<INITIAL>[0-9]*\.[0-9]+([eE][+-]?[0-9]+)?[hHfF]?    {return T_TEXT;}
+-<INITIAL>[0-9]+\.([eE][+-]?[0-9]+)?[hHfF]?          {return T_TEXT;}
+-<INITIAL>[0-9]+([eE][+-]?[0-9]+)?[hHfF]             {return T_TEXT;}
++<INITIAL>[0-9]*\.[0-9]+([eE][+-]?[0-9]+)?[hHfFlL]?    {return T_TEXT;}
++<INITIAL>[0-9]+\.([eE][+-]?[0-9]+)?[hHfFlL]?          {return T_TEXT;}
++<INITIAL>[0-9]+([eE][+-]?[0-9]+)?[hHfFlL]             {return T_TEXT;}
+ <INITIAL>[0-9]+[eE][+-]?[0-9]+                      {return T_TEXT;}
+ <INITIAL,LINE>0[xX][0-9a-fA-f]+{INT_SUFFIX}         {return T_INTEGER;}
+ <INITIAL,LINE>0[0-7]*{INT_SUFFIX}                   {return T_INTEGER;}
+-- 
+2.53.0
+

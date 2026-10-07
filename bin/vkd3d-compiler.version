@@ -44,3 +44,5 @@ vkd3d-2.1-93-gcfcb4833
 0043-vkd3d-shader-hlsl-Accept-the-fastopt-and-allow_uav_c.patch
 0044-vkd3d-shader-hlsl-Struct-member-functions-SampleGrad.patch
 0045-vkd3d-shader-hlsl-Compile-time-on-very-large-shaders.patch
+0046-vkd3d-shader-Accept-the-l-suffix-on-floating-point-l.patch
+0047-vkd3d-shader-hlsl-Negate-in-the-type-of-the-subtract.patch

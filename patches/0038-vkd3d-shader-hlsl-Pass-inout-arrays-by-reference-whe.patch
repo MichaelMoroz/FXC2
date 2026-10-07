@@ -1,7 +1,7 @@
 From ac4dd49113174cf18246dd5156435b6eaccfdc11 Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 19:38:36 +0200
-Subject: [PATCH 38/45] vkd3d-shader/hlsl: Pass inout arrays by reference where
+Subject: [PATCH 38/47] vkd3d-shader/hlsl: Pass inout arrays by reference where
  that is the same; fix array copy propagation.
 
 ---
