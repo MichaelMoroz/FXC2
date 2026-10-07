@@ -1,7 +1,7 @@
 From ac3d162b44295604d4373427ddc2a56a09925689 Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 08:11:31 +0200
-Subject: [PATCH 23/35] vkd3d-shader/hlsl: Do not flatten branches that access
+Subject: [PATCH 23/37] vkd3d-shader/hlsl: Do not flatten branches that access
  arrays with a run-time index.
 
 ---

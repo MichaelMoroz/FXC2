@@ -1,7 +1,7 @@
 From 43a8fd366660cf3ff10f56f06404708856b21f30 Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 06:44:47 +0200
-Subject: [PATCH 04/35] vkd3d-shader/hlsl: Support pass-through
+Subject: [PATCH 04/37] vkd3d-shader/hlsl: Support pass-through
  SV_InstanceID/SV_VertexID, SV_DepthLessEqual/GreaterEqual and GS instancing.
 
 ---

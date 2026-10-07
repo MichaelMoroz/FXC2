@@ -1,0 +1,119 @@
+From 2b02d61483cd689ae180b77ebca9c1e96a5bb35c Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Wed, 7 Oct 2026 18:51:45 +0200
+Subject: [PATCH 36/37] vkd3d-shader/ir: Read swizzles of values in place, fold
+ not of a variable into the test.
+
+---
+ libs/vkd3d-shader/ir.c | 45 +++++++++++++++++++++++++++---------------
+ 1 file changed, 29 insertions(+), 16 deletions(-)
+
+diff --git a/libs/vkd3d-shader/ir.c b/libs/vkd3d-shader/ir.c
+index 1abc5a72..7354d488 100644
+--- a/libs/vkd3d-shader/ir.c
++++ b/libs/vkd3d-shader/ir.c
+@@ -12955,20 +12955,25 @@ static unsigned int forward_count_ssa_in_indices(const struct vsir_operand *reg,
+  * and unless the variable changes before the copy is last used, the copy is
+  * not needed. "list[index]" is the mov; returns whether it was removed. */
+ static bool forward_source(struct vsir_instruction **list, unsigned int count, unsigned int index,
+-        const struct forward_ssa *ssa)
++        struct forward_ssa *ssa)
+ {
+     struct vsir_instruction *mov = list[index];
+     unsigned int id = mov->dst[0].reg.idx[0].offset, temp = mov->src[0].reg.idx[0].offset;
+-    unsigned int remaining = ssa[id].use_count, end;
++    /* A copy of a value, "mov sr2.x, sr1.wxxx", is how a swizzle comes out.
++     * A value never changes, so that one holds wherever it is used. */
++    bool value = mov->src[0].reg.type == VSIR_REGISTER_SSA;
++    unsigned int remaining = ssa[id].use_count, uses = remaining, end, first = 0;
+ 
+     if (!remaining)
+         return false;
++    while (!(mov->dst[0].write_mask & (1u << first)))
++        ++first;
+ 
+-    for (end = index + 1; end < count && end - index <= 64; ++end)
++    for (end = index + 1; end < count && (value || end - index <= 64); ++end)
+     {
+         const struct vsir_instruction *ins = list[end];
+ 
+-        if (vsir_opcode_is_block_boundary(ins->opcode))
++        if (!value && vsir_opcode_is_block_boundary(ins->opcode))
+             return false;
+         for (unsigned int i = 0; i < ins->src_count; ++i)
+         {
+@@ -12981,13 +12986,6 @@ static bool forward_source(struct vsir_instruction **list, unsigned int count, u
+                 continue;
+             if (src->reg.dimension != VSIR_DIMENSION_VEC4)
+                 return false;
+-            for (unsigned int j = 0; j < VKD3D_VEC4_SIZE; ++j)
+-            {
+-                /* Components the copy does not have may be named where they
+-                 * are not used; all the same, leave those alone. */
+-                if (!(mov->dst[0].write_mask & (1u << vsir_swizzle_get_component(src->swizzle, j))))
+-                    return false;
+-            }
+             --remaining;
+         }
+         for (unsigned int i = 0; i < ins->dst_count; ++i)
+@@ -12997,7 +12995,7 @@ static bool forward_source(struct vsir_instruction **list, unsigned int count, u
+         }
+         if (!remaining)
+             break;
+-        if (vsir_instruction_writes_temp(ins, temp))
++        if (!value && vsir_instruction_writes_temp(ins, temp))
+             return false;
+     }
+     if (remaining)
+@@ -13016,13 +13014,22 @@ static bool forward_source(struct vsir_instruction **list, unsigned int count, u
+             if (src->reg.type != VSIR_REGISTER_SSA || src->reg.idx[0].offset != id)
+                 continue;
+             for (unsigned int j = 0; j < VKD3D_VEC4_SIZE; ++j)
+-                vsir_swizzle_set_component(&swizzle, j, vsir_swizzle_get_component(mov->src[0].swizzle,
+-                        vsir_swizzle_get_component(src->swizzle, j)));
++            {
++                unsigned int component = vsir_swizzle_get_component(src->swizzle, j);
++
++                /* Components the copy does not have can be named where they
++                 * are not used. */
++                if (!(mov->dst[0].write_mask & (1u << component)))
++                    component = first;
++                vsir_swizzle_set_component(&swizzle, j, vsir_swizzle_get_component(mov->src[0].swizzle, component));
++            }
+             src->reg = mov->src[0].reg;
+             src->reg.data_type = data_type;
+             src->swizzle = swizzle;
+         }
+     }
++    if (value)
++        ssa[temp].use_count += uses - 1;
+     vsir_instruction_make_nop(mov);
+     return true;
+ }
+@@ -13071,7 +13078,12 @@ static void vsir_program_fold_conditionals(struct vsir_program *program, struct
+                 && ssa[src->reg.idx[0].offset].use_count == 1
+                 && def->dst[0].reg.type == VSIR_REGISTER_SSA
+                 && def->dst[0].reg.idx[0].offset == src->reg.idx[0].offset && !def->dst[0].modifiers
+-                && def->src[0].reg.type == VSIR_REGISTER_SSA && !def->src[0].modifiers
++                && !def->src[0].modifiers && def->src[0].reg.dimension == VSIR_DIMENSION_VEC4
++                && (def->src[0].reg.type == VSIR_REGISTER_SSA
++                /* A variable must not change in between; take it when the two are adjacent. */
++                || (def->src[0].reg.type == VSIR_REGISTER_TEMP && def->src[0].reg.idx_count == 1
++                && !def->src[0].reg.idx[0].rel_addr
++                && forward_skip_nops(list, count, ssa[src->reg.idx[0].offset].def_index + 1) == i))
+                 && (def->dst[0].write_mask & (1u << vsir_swizzle_get_component(src->swizzle, 0))))
+         {
+             unsigned int component = vsir_swizzle_get_component(def->src[0].swizzle,
+@@ -13156,7 +13168,8 @@ static enum vkd3d_result vsir_program_forward_destinations(struct vsir_program *
+         ins = list[i];
+         if (ins->opcode == VSIR_OP_MOV && ins->dst_count == 1 && ins->src_count == 1
+                 && ins->dst[0].reg.type == VSIR_REGISTER_SSA && !ins->dst[0].modifiers
+-                && ins->src[0].reg.type == VSIR_REGISTER_TEMP && !ins->src[0].modifiers
++                && (ins->src[0].reg.type == VSIR_REGISTER_TEMP || ins->src[0].reg.type == VSIR_REGISTER_SSA)
++                && !ins->src[0].modifiers
+                 && ins->src[0].reg.idx_count == 1 && !ins->src[0].reg.idx[0].rel_addr
+                 && ins->src[0].reg.dimension == VSIR_DIMENSION_VEC4
+                 && ssa[ins->dst[0].reg.idx[0].offset].def == ins)
+-- 
+2.53.0
+

@@ -1,0 +1,235 @@
+From f1a09e078617d6d30156cc912e2dd7761e445b57 Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Wed, 7 Oct 2026 18:55:42 +0200
+Subject: [PATCH 37/37] vkd3d-shader/ir: Forward values that are stored and
+ used, and copies of variables as far as they hold.
+
+---
+ libs/vkd3d-shader/ir.c | 164 ++++++++++++++++++++++++++++++++++-------
+ 1 file changed, 136 insertions(+), 28 deletions(-)
+
+diff --git a/libs/vkd3d-shader/ir.c b/libs/vkd3d-shader/ir.c
+index 7354d488..7aafad2a 100644
+--- a/libs/vkd3d-shader/ir.c
++++ b/libs/vkd3d-shader/ir.c
+@@ -12954,6 +12954,31 @@ static unsigned int forward_count_ssa_in_indices(const struct vsir_operand *reg,
+  *
+  * and unless the variable changes before the copy is last used, the copy is
+  * not needed. "list[index]" is the mov; returns whether it was removed. */
++static unsigned int forward_count_uses(const struct vsir_instruction *ins, unsigned int id, bool *awkward)
++{
++    unsigned int uses = 0;
++
++    for (unsigned int i = 0; i < ins->src_count; ++i)
++    {
++        const struct vsir_src_operand *src = &ins->src[i];
++
++        /* As an array index it would need its swizzle looking at. */
++        if (forward_count_ssa_in_indices(&src->reg, id))
++            *awkward = true;
++        if (src->reg.type != VSIR_REGISTER_SSA || src->reg.idx[0].offset != id)
++            continue;
++        if (src->reg.dimension != VSIR_DIMENSION_VEC4)
++            *awkward = true;
++        ++uses;
++    }
++    for (unsigned int i = 0; i < ins->dst_count; ++i)
++    {
++        if (forward_count_ssa_in_indices(&ins->dst[i].reg, id))
++            *awkward = true;
++    }
++    return uses;
++}
++
+ static bool forward_source(struct vsir_instruction **list, unsigned int count, unsigned int index,
+         struct forward_ssa *ssa)
+ {
+@@ -12962,46 +12987,33 @@ static bool forward_source(struct vsir_instruction **list, unsigned int count, u
+     /* A copy of a value, "mov sr2.x, sr1.wxxx", is how a swizzle comes out.
+      * A value never changes, so that one holds wherever it is used. */
+     bool value = mov->src[0].reg.type == VSIR_REGISTER_SSA;
+-    unsigned int remaining = ssa[id].use_count, uses = remaining, end, first = 0;
++    unsigned int remaining = ssa[id].use_count, uses = remaining, end, last = index, first = 0;
+ 
+     if (!remaining)
+         return false;
+     while (!(mov->dst[0].write_mask & (1u << first)))
+         ++first;
+ 
++    /* Uses the copy cannot be shown to hold for keep it; the others still
++     * need not wait for it. */
+     for (end = index + 1; end < count && (value || end - index <= 64); ++end)
+     {
+         const struct vsir_instruction *ins = list[end];
++        bool awkward = false;
++        unsigned int n;
+ 
+-        if (!value && vsir_opcode_is_block_boundary(ins->opcode))
+-            return false;
+-        for (unsigned int i = 0; i < ins->src_count; ++i)
+-        {
+-            const struct vsir_src_operand *src = &ins->src[i];
+-
+-            /* As an array index it would need its swizzle looking at. */
+-            if (forward_count_ssa_in_indices(&src->reg, id))
+-                return false;
+-            if (src->reg.type != VSIR_REGISTER_SSA || src->reg.idx[0].offset != id)
+-                continue;
+-            if (src->reg.dimension != VSIR_DIMENSION_VEC4)
+-                return false;
+-            --remaining;
+-        }
+-        for (unsigned int i = 0; i < ins->dst_count; ++i)
+-        {
+-            if (forward_count_ssa_in_indices(&ins->dst[i].reg, id))
+-                return false;
+-        }
++        n = forward_count_uses(ins, id, &awkward);
++        if (awkward)
++            break;
++        remaining -= n;
++        last = end;
+         if (!remaining)
+             break;
+-        if (!value && vsir_instruction_writes_temp(ins, temp))
+-            return false;
++        if (!value && (vsir_opcode_is_block_boundary(ins->opcode) || vsir_instruction_writes_temp(ins, temp)))
++            break;
+     }
+-    if (remaining)
+-        return false;
+ 
+-    for (unsigned int k = index + 1; k <= end; ++k)
++    for (unsigned int k = index + 1; k <= last; ++k)
+     {
+         struct vsir_instruction *ins = list[k];
+ 
+@@ -13028,12 +13040,90 @@ static bool forward_source(struct vsir_instruction **list, unsigned int count, u
+             src->swizzle = swizzle;
+         }
+     }
++
+     if (value)
+-        ssa[temp].use_count += uses - 1;
++        ssa[temp].use_count += uses - remaining - !remaining;
++    ssa[id].use_count = remaining;
++    if (remaining)
++        return false;
+     vsir_instruction_make_nop(mov);
+     return true;
+ }
+ 
++/* A value that is stored in a variable and used as well:
++ *
++ *     ieq sr9.x, sr8.x, r147.x
++ *     mov r273.x, sr9.x
++ *     and sr12.x, sr9.x, sr11.x
++ *
++ * can still be computed into the variable, with the other uses reading that,
++ * as long as they come before the variable changes again. Checks that with
++ * "apply" false, does it with "apply" true; "def" has by then been changed. */
++static bool forward_other_uses(struct vsir_instruction **list, unsigned int count, unsigned int def_index,
++        unsigned int mov_index, unsigned int id, unsigned int uses, uint32_t def_mask,
++        const struct vsir_dst_operand *dst, uint32_t mov_swizzle, bool apply)
++{
++    unsigned int inverse[VKD3D_VEC4_SIZE] = {~0u, ~0u, ~0u, ~0u}, first = ~0u, remaining = uses - 1;
++    unsigned int temp = dst->reg.idx[0].offset;
++
++    for (unsigned int j = 0; j < VKD3D_VEC4_SIZE; ++j)
++    {
++        unsigned int c = vsir_swizzle_get_component(mov_swizzle, j);
++
++        if (!(dst->write_mask & (1u << j)))
++            continue;
++        if (inverse[c] == ~0u)
++            inverse[c] = j;
++        if (first == ~0u)
++            first = j;
++    }
++
++    for (unsigned int k = def_index + 1; k < count && (k < mov_index || k - mov_index <= 64); ++k)
++    {
++        struct vsir_instruction *ins = list[k];
++        bool awkward = false;
++
++        if (k == mov_index)
++            continue;
++        remaining -= forward_count_uses(ins, id, &awkward);
++        if (awkward)
++            return false;
++
++        for (unsigned int i = 0; i < ins->src_count; ++i)
++        {
++            struct vsir_src_operand *src = &ins->src[i];
++            enum vsir_data_type data_type = src->reg.data_type;
++            uint32_t swizzle = 0;
++
++            if (src->reg.type != VSIR_REGISTER_SSA || src->reg.idx[0].offset != id)
++                continue;
++            for (unsigned int j = 0; j < VKD3D_VEC4_SIZE; ++j)
++            {
++                unsigned int c = vsir_swizzle_get_component(src->swizzle, j);
++
++                if (!(def_mask & (1u << c)))
++                    vsir_swizzle_set_component(&swizzle, j, first);
++                else if (inverse[c] == ~0u)
++                    return false;
++                else
++                    vsir_swizzle_set_component(&swizzle, j, inverse[c]);
++            }
++            if (apply)
++            {
++                src->reg = dst->reg;
++                src->reg.data_type = data_type;
++                src->swizzle = swizzle;
++            }
++        }
++
++        if (!remaining)
++            return true;
++        if (k > mov_index && (vsir_opcode_is_block_boundary(ins->opcode) || vsir_instruction_writes_temp(ins, temp)))
++            return false;
++    }
++    return false;
++}
++
+ static bool vsir_opcode_is_conditional(enum vsir_opcode opcode)
+ {
+     return opcode == VSIR_OP_IF || opcode == VSIR_OP_BREAKP || opcode == VSIR_OP_CONTINUEP
+@@ -13193,7 +13283,10 @@ static enum vkd3d_result vsir_program_forward_destinations(struct vsir_program *
+             continue;
+ 
+         value = &ssa[ins->src[0].reg.idx[0].offset];
+-        if (!value->def || value->use_count != 1 || value->def_index >= i || value->def->dst[0].modifiers)
++        if (!value->def || !value->use_count || value->def_index >= i || value->def->opcode == VSIR_OP_NOP
++                || value->def->dst_count != 1 || value->def->dst[0].modifiers)
++            continue;
++        if (value->use_count != 1 && (dst->type != VSIR_REGISTER_TEMP || ins->dst[0].modifiers))
+             continue;
+ 
+         if (dst->type == VSIR_REGISTER_TEMP)
+@@ -13210,6 +13303,21 @@ static enum vkd3d_result vsir_program_forward_destinations(struct vsir_program *
+                 continue;
+         }
+ 
++        if (value->use_count != 1)
++        {
++            unsigned int id = ins->src[0].reg.idx[0].offset;
++            uint32_t def_mask = value->def->dst[0].write_mask, mov_swizzle = ins->src[0].swizzle;
++            struct vsir_dst_operand copy = ins->dst[0];
++
++            if (!forward_other_uses(list, count, value->def_index, i, id, value->use_count,
++                    def_mask, &copy, mov_swizzle, false) || !forward_destination(value->def, ins))
++                continue;
++            forward_other_uses(list, count, value->def_index, i, id, value->use_count,
++                    def_mask, &copy, mov_swizzle, true);
++            ssa[id].use_count = 0;
++            continue;
++        }
++
+         if (forward_destination(value->def, ins) && dst->type == VSIR_REGISTER_SSA)
+         {
+             ssa[dst->idx[0].offset].def = value->def;
+-- 
+2.53.0
+
