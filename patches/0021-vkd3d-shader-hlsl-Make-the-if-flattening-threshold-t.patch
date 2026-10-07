@@ -1,0 +1,52 @@
+From d1afd3965e1cce7b83df51d990ac4c443f97cd39 Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Wed, 7 Oct 2026 08:03:01 +0200
+Subject: [PATCH 21/22] vkd3d-shader/hlsl: Make the if-flattening threshold
+ tunable.
+
+---
+ libs/vkd3d-shader/hlsl_codegen.c | 23 ++++++++++++++++++++++-
+ 1 file changed, 22 insertions(+), 1 deletion(-)
+
+diff --git a/libs/vkd3d-shader/hlsl_codegen.c b/libs/vkd3d-shader/hlsl_codegen.c
+index d0405e3a..d58c2ccc 100644
+--- a/libs/vkd3d-shader/hlsl_codegen.c
++++ b/libs/vkd3d-shader/hlsl_codegen.c
+@@ -5058,12 +5058,33 @@ static bool remove_trivial_conditional_branches(struct hlsl_ctx *ctx, struct hls
+     return true;
+ }
+ 
++static bool hlsl_tuning_enabled(const char *variable, bool default_value);
++
++/* fxc2: how many expressions and stores an if or else block may hold and still
++ * be turned into conditional moves when the source does not say [branch] or
++ * [flatten]. VKD3D_HLSL_FLATTEN overrides it; 0 never flattens. */
++static unsigned int flatten_max_cost(void)
++{
++    static int cost = -1;
++
++    if (cost < 0)
++    {
++        const char *env = getenv("VKD3D_HLSL_FLATTEN");
++
++        cost = env ? atoi(env) : 10;
++    }
++    return cost;
++}
++
+ static bool is_conditional_block_simple(const struct hlsl_block *cond_block)
+ {
+-    static const unsigned int max_cost = 10;
++    const unsigned int max_cost = flatten_max_cost();
+     struct hlsl_ir_node *instr;
+     unsigned int cost = 0;
+ 
++    if (!max_cost)
++        return false;
++
+     LIST_FOR_EACH_ENTRY(instr, &cond_block->instrs, struct hlsl_ir_node, entry)
+     {
+         switch (instr->type)
+-- 
+2.53.0
+
