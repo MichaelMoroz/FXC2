@@ -235,6 +235,13 @@ int main(int argc, char **argv)
     HRESULT hr;
     int i;
 
+    /* vkd3d logs FIXMEs for harmless things like #line; keep stderr for
+     * real diagnostics unless the user asked for debug output. */
+    if (!getenv("VKD3D_DEBUG"))
+        _putenv("VKD3D_DEBUG=none");
+    if (!getenv("VKD3D_SHADER_DEBUG"))
+        _putenv("VKD3D_SHADER_DEBUG=none");
+
     for (i = 1; i < argc; ++i)
     {
         const char *arg = argv[i];

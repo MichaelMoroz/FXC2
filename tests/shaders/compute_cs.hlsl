@@ -1,13 +1,13 @@
 // profile: cs_5_0
-struct Particle { float3 pos; float life; float3 vel; uint id; };
+// compute: 8
+// Executed on WARP: u0 is a 1024 byte raw buffer, u1 a 64 element structured
+// buffer of 16 byte elements; the final contents are compared against FXC's.
+struct Particle { float3 pos; float life; };
 
-RWStructuredBuffer<Particle> particles : register(u0);
-RWTexture2D<float4> outImage : register(u1);
-Texture2D<float4> inImage : register(t0);
-StructuredBuffer<float4> forces : register(t1);
-RWByteAddressBuffer counters : register(u2);
+RWByteAddressBuffer raw : register(u0);
+RWStructuredBuffer<Particle> particles : register(u1);
 
-cbuffer Params : register(b0) { float dt; uint count; uint2 dims; };
+groupshared uint shared_sum[8];
 
 uint hash(uint x)
 {
@@ -15,31 +15,34 @@ uint hash(uint x)
     return x;
 }
 
-[numthreads(8, 8, 1)]
-void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex)
+[numthreads(8, 1, 1)]
+void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex, uint3 gid : SV_GroupID)
 {
-    uint idx = id.y * dims.x + id.x;
-    if (idx < count)
+    uint idx = id.x;
+    uint n = 64, stride = 16;
+
+    shared_sum[gi] = raw.Load(idx * 16) & 0xffu;
+    GroupMemoryBarrierWithGroupSync();
+    uint total = 0;
+    for (uint k = 0; k < 8; ++k)
+        total += shared_sum[k];
+
+    Particle p = particles.Load(idx);
+    uint3 seed = raw.Load3(idx * 16 + 4);
+    float3 vel = float3(hash(seed.x) & 1023u, hash(seed.y) & 1023u, hash(seed.z) & 1023u) / 1024.0 - 0.5;
+    for (uint step = 0; step < (idx & 7u) + 1u; ++step)
     {
-        Particle p = particles[idx];
-        float3 f = 0;
-        for (uint k = 0; k < 4; ++k)
-            f += forces[k].xyz * forces[k].w;
-        p.vel += f * dt;
-        p.pos += p.vel * dt;
-        p.life -= dt;
-        if (p.life <= 0)
+        p.pos += vel * 0.25;
+        p.life -= 0.125;
+        if (p.life <= 0.0)
         {
-            p.life = (hash(idx ^ p.id) & 0xffff) / 65535.0;
+            p.life = (hash(idx ^ step) & 0xffffu) / 65535.0;
             p.pos = 0;
-            uint prev;
-            counters.InterlockedAdd(0, 1, prev);
         }
-        particles[idx] = p;
     }
-    float4 c = inImage[id.xy];
-    uint w, h;
-    inImage.GetDimensions(w, h);
-    c.rgb = pow(abs(c.rgb), 2.2) * (float)(id.x < w / 2);
-    outImage[id.xy] = c + inImage.Load(int3(id.xy, 0), int2(1, 0)) * 0.25;
+    particles[idx] = p;
+
+    raw.Store(idx * 16, total + gid.x * 1000u);
+    raw.Store2(idx * 16 + 4, uint2(hash(idx), n * stride));
+    raw.Store(idx * 16 + 12, asuint(p.life));
 }

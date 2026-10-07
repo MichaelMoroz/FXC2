@@ -14,10 +14,11 @@ D3D11_SDK_VERSION = 7
 DXGI_FORMAT_R32G32B32A32_FLOAT = 2
 
 # vtable slots
-DEV_CREATE_BUFFER, DEV_CREATE_TEX2D, DEV_CREATE_RTV = 3, 5, 9
+DEV_CREATE_BUFFER, DEV_CREATE_TEX2D, DEV_CREATE_UAV, DEV_CREATE_RTV = 3, 5, 8, 9
 DEV_CREATE = {"vs": 12, "gs": 13, "ps": 15, "hs": 16, "ds": 17, "cs": 18}
 CTX_PS_SET_SHADER, CTX_VS_SET_SHADER, CTX_DRAW, CTX_MAP, CTX_UNMAP = 9, 11, 13, 14, 15
-CTX_PS_SET_CB, CTX_IA_TOPOLOGY, CTX_OM_SET_RT, CTX_RS_VIEWPORTS, CTX_COPY_RESOURCE = 16, 24, 33, 44, 47
+CTX_PS_SET_CB, CTX_IA_TOPOLOGY, CTX_OM_SET_RT, CTX_DISPATCH, CTX_RS_VIEWPORTS, CTX_COPY_RESOURCE = 16, 24, 33, 41, 44, 47
+CTX_CS_SET_UAVS, CTX_CS_SET_SHADER = 68, 69
 
 
 def _call(obj, slot, restype, *args):
@@ -105,3 +106,49 @@ class Device:
         for o in (cb, rtv, staging, rt, ps, vs):
             _release(o)
         return pixels
+
+    def _buffer(self, data, usage, bind, cpu, misc, stride):
+        desc = struct.pack("IIIIII", len(data), usage, bind, cpu, misc, stride)   # D3D11_BUFFER_DESC
+        init = (c_void_p * 3)(ctypes.cast(ctypes.c_char_p(data), c_void_p), None, None)
+        buf = c_void_p()
+        hr = _call(self.dev, DEV_CREATE_BUFFER, HRESULT, ctypes.c_char_p(desc), init, byref(buf))
+        assert hr >= 0, hex(hr & 0xffffffff)
+        return buf
+
+    def _readback(self, buf, size, misc, stride):
+        staging = self._buffer(bytes(1) * size, 3, 0, 0x20000, misc & 0x40, stride)
+        _call(self.ctx, CTX_COPY_RESOURCE, None, staging, buf)
+
+        class Mapped(ctypes.Structure):
+            _fields_ = [("data", c_void_p), ("row_pitch", c_uint), ("depth_pitch", c_uint)]
+        m = Mapped()
+        assert _call(self.ctx, CTX_MAP, HRESULT, staging, c_uint(0), c_uint(1), c_uint(0), byref(m)) >= 0
+        data = ctypes.string_at(m.data, size)
+        _call(self.ctx, CTX_UNMAP, None, staging, c_uint(0))
+        _release(staging)
+        return data
+
+    def run_compute(self, cs_blob, raw_data, struct_data, stride, groups):
+        """Dispatches (groups, 1, 1) with u0 = raw buffer and u1 = structured
+        buffer; returns the final contents of both."""
+        cs, hr = self.create_shader("cs", cs_blob)
+        if not cs:
+            raise OSError("compute shader creation failed: 0x%08x" % hr)
+        raw = self._buffer(raw_data, 0, 0x80, 0, 0x20, 0)             # UNORDERED_ACCESS, ALLOW_RAW_VIEWS
+        sbuf = self._buffer(struct_data, 0, 0x80, 0, 0x40, stride)   # UNORDERED_ACCESS, BUFFER_STRUCTURED
+        uavs = (c_void_p * 2)()
+        # D3D11_UNORDERED_ACCESS_VIEW_DESC: R32_TYPELESS, BUFFER, {first, count, RAW}
+        raw_desc = struct.pack("IIIII", 39, 1, 0, len(raw_data) // 4, 1)
+        raw_uav, struct_uav = c_void_p(), c_void_p()
+        assert _call(self.dev, DEV_CREATE_UAV, HRESULT, raw, ctypes.c_char_p(raw_desc), byref(raw_uav)) >= 0
+        assert _call(self.dev, DEV_CREATE_UAV, HRESULT, sbuf, c_void_p(None), byref(struct_uav)) >= 0
+        uavs[0], uavs[1] = raw_uav.value, struct_uav.value
+        _call(self.ctx, CTX_CS_SET_SHADER, None, cs, c_void_p(None), c_uint(0))
+        _call(self.ctx, CTX_CS_SET_UAVS, None, c_uint(0), c_uint(2), uavs, c_void_p(None))
+        _call(self.ctx, CTX_DISPATCH, None, c_uint(groups), c_uint(1), c_uint(1))
+        out = (self._readback(raw, len(raw_data), 0x20, 0), self._readback(sbuf, len(struct_data), 0x40, stride))
+        uavs[0] = uavs[1] = None
+        _call(self.ctx, CTX_CS_SET_UAVS, None, c_uint(0), c_uint(2), uavs, c_void_p(None))
+        for o in (raw_uav, struct_uav, raw, sbuf, cs):
+            _release(o)
+        return out

@@ -8,6 +8,19 @@
 #include <windows.h>
 #include <d3dcompiler.h>
 
+BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, void *reserved)
+{
+    /* Silence vkd3d's FIXME logging unless debug output was asked for. */
+    if (reason == DLL_PROCESS_ATTACH)
+    {
+        if (!getenv("VKD3D_DEBUG"))
+            _putenv("VKD3D_DEBUG=none");
+        if (!getenv("VKD3D_SHADER_DEBUG"))
+            _putenv("VKD3D_SHADER_DEBUG=none");
+    }
+    return TRUE;
+}
+
 HRESULT WINAPI D3DReadFileToBlob(const WCHAR *filename, ID3DBlob **contents)
 {
     DWORD size, read;

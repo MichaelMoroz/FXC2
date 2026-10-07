@@ -95,9 +95,10 @@ def main():
     vs_blob = open(vs_obj, "rb").read()
 
     print("%-18s %-7s | %-8s %8s %6s %5s | %8s %6s %5s | %-8s %s" % (
-        "shader", "profile", "fxc2", "time", "bytes", "insns", "fxc time", "bytes", "insns", "d3d11", "render vs fxc"))
+        "shader", "profile", "fxc2", "time", "bytes", "insns", "fxc time", "bytes", "insns", "d3d11", "execution vs fxc"))
     failures = 0
-    for src in sorted(glob.glob(os.path.join(HERE, "shaders", "*.hlsl"))):
+    sources = glob.glob(os.path.join(HERE, "shaders", "*.hlsl")) + glob.glob(os.path.join(HERE, "shaders", "*.slang"))
+    for src in sorted(sources):
         name = os.path.splitext(os.path.basename(src))[0]
         if args.filter not in name:
             continue
@@ -110,10 +111,11 @@ def main():
             if os.path.exists(p):
                 os.remove(p)
 
-        rc, msg, t_ours = compile_fxc2(src, profile, ours, args.pipeline)
+        # A `// via:` line pins shaders written in a language only one front end parses.
+        rc, msg, t_ours = compile_fxc2(src, profile, ours, d.get("via", args.pipeline))
         ok = rc == 0 and os.path.exists(ours)
         ref_ok, t_ref = False, 0.0
-        if fxc:
+        if fxc and "via" not in d:
             rrc, _, t_ref = run([fxc, "/nologo", "/T", profile, "/E", "main", "/Fo", ref, src])
             ref_ok = rrc == 0
 
@@ -136,10 +138,23 @@ def main():
             cb = struct.pack("%df" % len(d["render"].split()), *map(float, d["render"].split()))
             a = dev.render(vs_blob, open(ours, "rb").read(), cb)
             b = dev.render(vs_blob, open(ref, "rb").read(), cb)
-            worst = max(abs(x - y) if x == x or y == y else 0.0 for x, y in zip(a, b))
-            bad = sum(1 for x, y in zip(a, b) if abs(x - y) > TOLERANCE)
+            # NaN on both sides is agreement; NaN on one side is a mismatch.
+            diffs = [0.0 if x != x and y != y else float("inf") if x != x or y != y else abs(x - y)
+                     for x, y in zip(a, b)]
+            worst = max(diffs)
+            bad = sum(1 for v in diffs if v > TOLERANCE)
             render = "max diff %.2g" % worst + ("" if not bad else "  MISMATCH in %d/%d values" % (bad, len(a)))
             ok = ok and not bad
+        if ok and ref_ok and "compute" in d:
+            raw = struct.pack("256I", *((i * 2654435761) & 0xffffffff for i in range(256)))
+            particles = struct.pack("256f", *((i % 13) * 0.125 - 0.5 for i in range(256)))
+            a = dev.run_compute(open(ours, "rb").read(), raw, particles, 16, int(d["compute"]))
+            b = dev.run_compute(open(ref, "rb").read(), raw, particles, 16, int(d["compute"]))
+            fa, fb = struct.unpack("256f", a[1]), struct.unpack("256f", b[1])
+            worst = max(abs(x - y) for x, y in zip(fa, fb))
+            same_raw = a[0] == b[0] and a[0] != raw
+            render = "compute: raw %s, structured max diff %.2g" % ("identical" if same_raw else "MISMATCH", worst)
+            ok = ok and same_raw and worst <= TOLERANCE
         cols.append("%-8s %s" % (status, render))
         print(" | ".join(cols))
         if not ok:

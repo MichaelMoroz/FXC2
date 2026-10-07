@@ -1,0 +1,90 @@
+From 5e0282a13ceb6735cab67f6593859f9de8133b9d Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Wed, 7 Oct 2026 05:04:13 +0200
+Subject: [PATCH 3/3] vkd3d-shader/hlsl: Add Load() and GetDimensions() for
+ UAVs and Load() for structured buffers.
+
+---
+ libs/vkd3d-shader/hlsl.y         | 34 ++++++++++++++++++++++++++++++--
+ libs/vkd3d-shader/hlsl_codegen.c |  4 ++--
+ 2 files changed, 34 insertions(+), 4 deletions(-)
+
+diff --git a/libs/vkd3d-shader/hlsl.y b/libs/vkd3d-shader/hlsl.y
+index 4676a996..6497b296 100644
+--- a/libs/vkd3d-shader/hlsl.y
++++ b/libs/vkd3d-shader/hlsl.y
+@@ -6106,8 +6106,13 @@ static bool add_load_method_call(struct hlsl_ctx *ctx, struct hlsl_block *block,
+ 
+     if (object_type->sampler_dim == HLSL_SAMPLER_DIM_STRUCTURED_BUFFER)
+     {
+-        hlsl_fixme(ctx, loc, "Method '%s' for structured buffers.", name);
+-        return false;
++        /* fxc2: sb.Load(i) is sb[i]. */
++        if (params->args_count != 1)
++        {
++            hlsl_fixme(ctx, loc, "Method '%s' for structured buffers with a status argument.", name);
++            return false;
++        }
++        return add_array_access(ctx, block, object, params->args[0], loc);
+     }
+ 
+     sampler_dim = hlsl_sampler_dim_count(object_type->sampler_dim);
+@@ -6776,6 +6781,23 @@ static bool add_so_restartstrip_method_call(struct hlsl_ctx *ctx, struct hlsl_bl
+     return true;
+ }
+ 
++/* fxc2: Load() on a UAV takes no mip level; apart from raw buffers it is
++ * the same thing as indexing. */
++static bool add_uav_load_method_call(struct hlsl_ctx *ctx, struct hlsl_block *block, struct hlsl_ir_node *object,
++        const char *name, const struct parse_initializer *params, const struct vkd3d_shader_location *loc)
++{
++    if (object->data_type->sampler_dim == HLSL_SAMPLER_DIM_RAW_BUFFER)
++        return add_raw_load_method_call(ctx, block, object, name, params, loc);
++
++    if (params->args_count != 1)
++    {
++        hlsl_error(ctx, loc, VKD3D_SHADER_ERROR_HLSL_WRONG_PARAMETER_COUNT,
++                "Wrong number of arguments to method 'Load': expected 1, but got %u.", params->args_count);
++        return false;
++    }
++    return add_array_access(ctx, block, object, params->args[0], loc);
++}
++
+ static const struct method_function
+ {
+     const char *name;
+@@ -6813,6 +6835,14 @@ texture_methods[] =
+ 
+ static const struct method_function uav_methods[] =
+ {
++    /* fxc2: read side of UAVs. */
++    { "GetDimensions", add_getdimensions_method_call, "00111011000100" },
++
++    { "Load",   add_uav_load_method_call, "00111011000111" },
++    { "Load2",  add_raw_load_method_call, "00000000000001" },
++    { "Load3",  add_raw_load_method_call, "00000000000001" },
++    { "Load4",  add_raw_load_method_call, "00000000000001" },
++
+     { "Store",  add_store_method_call, "00000000000001" },
+     { "Store2", add_store_method_call, "00000000000001" },
+     { "Store3", add_store_method_call, "00000000000001" },
+diff --git a/libs/vkd3d-shader/hlsl_codegen.c b/libs/vkd3d-shader/hlsl_codegen.c
+index 0f87cbcb..bd266ffc 100644
+--- a/libs/vkd3d-shader/hlsl_codegen.c
++++ b/libs/vkd3d-shader/hlsl_codegen.c
+@@ -13432,10 +13432,10 @@ static bool sm4_generate_vsir_instr_ld(struct hlsl_ctx *ctx,
+ 
+     if (structured)
+         opcode = VSIR_OP_LD_STRUCTURED;
+-    else if (uav)
+-        opcode = VSIR_OP_LD_UAV_TYPED;
+     else if (raw)
+         opcode = VSIR_OP_LD_RAW;
++    else if (uav)
++        opcode = VSIR_OP_LD_UAV_TYPED;
+     else
+         opcode = multisampled ? VSIR_OP_LD2DMS : VSIR_OP_LD;
+ 
+-- 
+2.53.0
+
