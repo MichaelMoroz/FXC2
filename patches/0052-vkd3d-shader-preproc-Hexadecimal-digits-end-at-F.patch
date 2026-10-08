@@ -1,0 +1,25 @@
+From 1a130dbc0a71336df1ddd2943e2a4b8215ef7785 Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Thu, 8 Oct 2026 06:35:33 +0200
+Subject: [PATCH 52/52] vkd3d-shader/preproc: Hexadecimal digits end at F.
+
+---
+ libs/vkd3d-shader/preproc.l | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/libs/vkd3d-shader/preproc.l b/libs/vkd3d-shader/preproc.l
+index d06ade18..4b03dd8b 100644
+--- a/libs/vkd3d-shader/preproc.l
++++ b/libs/vkd3d-shader/preproc.l
+@@ -112,7 +112,7 @@ INT_SUFFIX      [uUlL]{0,2}
+ <INITIAL>[0-9]+\.([eE][+-]?[0-9]+)?[hHfFlL]?          {return T_TEXT;}
+ <INITIAL>[0-9]+([eE][+-]?[0-9]+)?[hHfFlL]             {return T_TEXT;}
+ <INITIAL>[0-9]+[eE][+-]?[0-9]+                      {return T_TEXT;}
+-<INITIAL,LINE>0[xX][0-9a-fA-f]+{INT_SUFFIX}         {return T_INTEGER;}
++<INITIAL,LINE>0[xX][0-9a-fA-F]+{INT_SUFFIX}         {return T_INTEGER;}
+ <INITIAL,LINE>0[0-7]*{INT_SUFFIX}                   {return T_INTEGER;}
+ <INITIAL,LINE>[1-9][0-9]*{INT_SUFFIX}               {return T_INTEGER;}
+ 
+-- 
+2.53.0
+

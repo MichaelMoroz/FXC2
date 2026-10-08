@@ -1,7 +1,7 @@
 From 2b6c0d248e95c3850168273bb69428eef28fe504 Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 23:43:41 +0200
-Subject: [PATCH 46/51] vkd3d-shader: Accept the l suffix on floating point
+Subject: [PATCH 46/52] vkd3d-shader: Accept the l suffix on floating point
  literals.
 
 ---

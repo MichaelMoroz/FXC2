@@ -1,7 +1,7 @@
 From c62156663bd28b3c111562b75a8336f9537c157c Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 16:18:57 +0200
-Subject: [PATCH 30/51] vkd3d-shader/hlsl: Multiply matrices by vectors with
+Subject: [PATCH 30/52] vkd3d-shader/hlsl: Multiply matrices by vectors with
  vector instructions.
 
 ---

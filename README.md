@@ -15,7 +15,7 @@ DXIL or SPIR-V, which D3D11, and so Unity's built-in pipeline and VRChat, cannot
 load.
 
 fxc2 is a second compiler for the same bytecode: vkd3d's HLSL compiler (the
-one Wine uses) with 51 patches, packaged as a command line and as a drop-in
+one Wine uses) with 52 patches, packaged as a command line and as a drop-in
 `d3dcompiler_47.dll`. What comes out is ordinary DXBC. Whoever runs the result
 needs nothing: a Unity build or a VRChat world made with it contains the
 bytecode, not the compiler.
@@ -76,7 +76,7 @@ caveats there).
   projects during this work and are fixed: one of this repository's own
   optimisations (caught by a Unity project's tests) and one in vkd3d (`float -
   uint` negated the unsigned value first; ShaderEmu's terminal showed it).
-  There are 26 execution tests here and the projects below; check what you
+  There are 27 execution tests here and the projects below; check what you
   ship.
 - **Not exercised:** shader model 1 to 3 output is compiled but never run;
   geometry, hull and domain shaders are checked to load and to render in
@@ -164,7 +164,7 @@ This repo packages that as:
 | `bin/vkd3d-compiler.exe` | Upstream vkd3d CLI (also does DXBC → SPIR-V/GLSL/MSL/asm). |
 | `tools/hlsl2dxbc.py` | Front-end chooser: `direct`, via Slang, via DXC + SPIRV-Cross, or `auto`. |
 | `bin/unity/` | The pair of DLLs Unity needs: a loader-proof stub named `D3DCompiler_47.dll` plus the real compiler as `fxc2_d3dcompiler.dll` (see Unity below). |
-| `patches/` | 51 patches on top of upstream vkd3d (see below); `tools/vkd3d-patch-scripts/` has the scripts they were made with. |
+| `patches/` | 52 patches on top of upstream vkd3d (see below); `tools/vkd3d-patch-scripts/` has the scripts they were made with. |
 | `tools/replay.py` | Recompiles sources the DLL captured (a Unity project's, say) with and without the optimisations and with FXC, and compares. |
 | `shaderemu/rvc_opt-fxc2.patch` | The changes to ShaderEmu's shader described under "The emulator shader" (merged there since). |
 | `tools/unity_render_shaders.cs`, `tools/compare_images.py` | Render every shader in a Unity folder with fxc2 and with the stock compiler, and compare the pictures. |
@@ -672,6 +672,10 @@ Patches 30 to 42:
 51. `refactoringAllowed` is set in the global flags as FXC does (`VKD3D_HLSL_IEEE_STRICT=1`
     leaves it out). No measured effect. Declaring arrays of scalars one component wide, as
     FXC also does, was tried with it and is 3.5% slower on ShaderEmu's tick: not done.
+52. **Hexadecimal literals swallowed a closing bracket** (upstream): the preprocessor's rule
+    for them took digits up to `f` from `A`, which takes in `[`, `]`, `^` and `_`. In a
+    macro's last argument, `xr[(w >> 20) & 0x1f]` never closed its bracket and the macro was
+    left unexpanded ("identifier is not declared"). `tests/shaders/macro_hex_ps.hlsl`.
 
 ## Approaches that do not work
 

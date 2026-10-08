@@ -1,7 +1,7 @@
 From 6b5f9099baca3a044faa7936978fc57ff28a184b Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 06:44:48 +0200
-Subject: [PATCH 06/51] vkd3d-shader/hlsl: Emulate firstbithigh() and
+Subject: [PATCH 06/52] vkd3d-shader/hlsl: Emulate firstbithigh() and
  firstbitlow() for shader model 4.
 
 ---
