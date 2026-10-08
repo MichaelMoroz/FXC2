@@ -15,7 +15,7 @@ DXIL or SPIR-V, which D3D11, and so Unity's built-in pipeline and VRChat, cannot
 load.
 
 fxc2 is a second compiler for the same bytecode: vkd3d's HLSL compiler (the
-one Wine uses) with 47 patches, packaged as a command line and as a drop-in
+one Wine uses) with 51 patches, packaged as a command line and as a drop-in
 `d3dcompiler_47.dll`. What comes out is ordinary DXBC. Whoever runs the result
 needs nothing: a Unity build or a VRChat world made with it contains the
 bytecode, not the compiler.
@@ -164,7 +164,7 @@ This repo packages that as:
 | `bin/vkd3d-compiler.exe` | Upstream vkd3d CLI (also does DXBC → SPIR-V/GLSL/MSL/asm). |
 | `tools/hlsl2dxbc.py` | Front-end chooser: `direct`, via Slang, via DXC + SPIRV-Cross, or `auto`. |
 | `bin/unity/` | The pair of DLLs Unity needs: a loader-proof stub named `D3DCompiler_47.dll` plus the real compiler as `fxc2_d3dcompiler.dll` (see Unity below). |
-| `patches/` | 47 patches on top of upstream vkd3d (see below); `tools/vkd3d-patch-scripts/` has the scripts they were made with. |
+| `patches/` | 51 patches on top of upstream vkd3d (see below); `tools/vkd3d-patch-scripts/` has the scripts they were made with. |
 | `tools/replay.py` | Recompiles sources the DLL captured (a Unity project's, say) with and without the optimisations and with FXC, and compares. |
 | `shaderemu/rvc_opt-fxc2.patch` | The changes to ShaderEmu's shader described under "The emulator shader" (merged there since). |
 | `tools/unity_render_shaders.cs`, `tools/compare_images.py` | Render every shader in a Unity folder with fxc2 and with the stock compiler, and compare the pictures. |
@@ -393,19 +393,26 @@ compilers emitted about 120 operations, but fxc2's had 6 branches where DXC's
 had 4, and a branch costs as much as six additions there. Patches 49 and 50,
 and a loop in the shader that leaves by `break` from the place that decides
 it, removed that; the harness now also commits only the bands of RAM that were
-written on D3D11, as it did on D3D12. Same session, state hashes equal:
+written on D3D11, as it did on D3D12. D3D11 with fxc2 is level with DXC or
+ahead now. Same session, state hashes equal:
 
 | | D3D11 + fxc2 before | D3D11 + fxc2 | D3D12 + DXC |
 |---|---|---|---|
-| fixed cost of a frame | 0.37 ms | 0.091 ms | 0.091 ms |
-| Linux bench, 2,048 instructions a frame | 2,759k IPS | 3,106k IPS | 3,227k IPS |
-| the same at 16,384 | 3,187k IPS | 3,627k IPS | 3,640k IPS |
-| Linux cold boot, 21,000 frames | 16.1 s | 14.55 s | 14.21 s |
-| raytracer guest, tick pass for 2,048 instructions | 0.444 ms | 0.365 ms | 0.348 ms |
+| fixed cost of a frame | 0.37 ms | 0.083 ms | 0.091 ms |
+| Linux bench, 2,048 instructions a frame | 2,759k IPS | 3,280k IPS | 3,256k IPS |
+| the same at 16,384 | 3,187k IPS | 3,660k IPS | 3,651k IPS |
+| Linux cold boot, 21,000 frames | 16.1 s | 13.74 s | 14.24 s |
+| raytracer guest, 40,000 frames | | 4,198k IPS | 4,046k IPS |
+| gears (the machine's GPU device) | | 3,786k IPS | 3,566k IPS |
 
-The rest is the API, not the bytecode: ShaderEmu's harness can give fxc2's
-bytecode to D3D12 (`RVC12_DXBC=1`), and there the raytracer's tick takes
-0.331 ms, less than DXC's DXIL. The same bytecode through D3D11 takes 0.365.
+Two of the four steps were not the compiler's: the commit in bands, and a
+`Flush` at the end of the harness's D3D11 frame (the GPU was handed the frame
+only when the readback's `Map` asked for it, 7% at 2,048 instructions a frame).
+
+On the tick pass alone the bytecode is ahead of DXC's and the API behind:
+ShaderEmu's harness can give fxc2's bytecode to D3D12 (`RVC12_DXBC=1`), and
+there the raytracer's tick takes 0.331 ms against 0.348 for DXC's DXIL. The
+same bytecode through D3D11 takes 0.355 to 0.365.
 
 The machine these were taken on drifted by up to 8% between sessions (FXC's
 bench figure was 1,595k on one day and 1,493k to 1,536k on another), so only
