@@ -383,6 +383,30 @@ The raytracer guest (73,669,730 instructions, machine mode, where MULH matters)
 ran at 4.18M IPS with `mulhi()` and at 3.96M and 4.13M in two runs without, with
 the same final state: a gain of a few percent at most.
 
+#### Against DXC on D3D12
+
+ShaderEmu's other backend, D3D12 with DXC, was 16% faster than D3D11 with fxc2
+on the Linux bench. Its DXIL has arbitrary control flow; in D3D11 bytecode a
+function that returns `bool` through early returns becomes a flag that is
+written, copied and tested. On the emulator's commonest instruction both
+compilers emitted about 120 operations, but fxc2's had 6 branches where DXC's
+had 4, and a branch costs as much as six additions there. Patches 49 and 50,
+and a loop in the shader that leaves by `break` from the place that decides
+it, removed that; the harness now also commits only the bands of RAM that were
+written on D3D11, as it did on D3D12. Same session, state hashes equal:
+
+| | D3D11 + fxc2 before | D3D11 + fxc2 | D3D12 + DXC |
+|---|---|---|---|
+| fixed cost of a frame | 0.37 ms | 0.091 ms | 0.091 ms |
+| Linux bench, 2,048 instructions a frame | 2,759k IPS | 3,106k IPS | 3,227k IPS |
+| the same at 16,384 | 3,187k IPS | 3,627k IPS | 3,640k IPS |
+| Linux cold boot, 21,000 frames | 16.1 s | 14.55 s | 14.21 s |
+| raytracer guest, tick pass for 2,048 instructions | 0.444 ms | 0.365 ms | 0.348 ms |
+
+The rest is the API, not the bytecode: ShaderEmu's harness can give fxc2's
+bytecode to D3D12 (`RVC12_DXBC=1`), and there the raytracer's tick takes
+0.331 ms, less than DXC's DXIL. The same bytecode through D3D11 takes 0.365.
+
 The machine these were taken on drifted by up to 8% between sessions (FXC's
 bench figure was 1,595k on one day and 1,493k to 1,536k on another), so only
 numbers from one session are compared with each other.
@@ -626,6 +650,21 @@ Patches 30 to 42:
     was done in `b`'s type before the conversion, so an unsigned 3 became 4294967293.0.
     ShaderEmu's terminal shader (`at - cell`, a `uint2`) showed it in Unity; it is
     `tests/shaders/terminal_ps.hlsl` now.
+48. Conditions are not made booleans first: `if`, `breakc` and `movc` test for "not zero"
+    themselves, so an `ine x, 0`, an `ieq x, 0` (the test or the two choices swap), a
+    `movc c, 1, 0` or an `and` of a comparison with 1 in front of them goes
+    (`VKD3D_SIMPLIFY_CONDITIONS=0` keeps them).
+49. **Flag tests are put where the flag was set.** When both sides of a branch leave a
+    constant in a variable and the next statement tests it, the tested code moves into the
+    places that stored the constant and the test goes. That is what a function returning
+    `bool` through early returns turns into once inlined: `if (!step()) break;` was a flag
+    written on both paths, copied, and tested twice. `VKD3D_HLSL_THREAD_FLAGS` is the limit
+    on the code this may duplicate (64 instructions by default, 0 switches it off).
+50. The same pass looks past values nothing uses (an inlined call leaves a load of its
+    return value behind), which is what stood between the branch and the test in practice.
+51. `refactoringAllowed` is set in the global flags as FXC does (`VKD3D_HLSL_IEEE_STRICT=1`
+    leaves it out). No measured effect. Declaring arrays of scalars one component wide, as
+    FXC also does, was tried with it and is 3.5% slower on ShaderEmu's tick: not done.
 
 ## Approaches that do not work
 

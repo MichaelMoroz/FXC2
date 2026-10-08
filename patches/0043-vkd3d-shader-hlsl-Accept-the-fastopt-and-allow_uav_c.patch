@@ -1,7 +1,7 @@
 From ea90c86a3be8cfdbd5bebcb39ce1b5a063be6c5b Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 21:10:20 +0200
-Subject: [PATCH 43/48] vkd3d-shader/hlsl: Accept the fastopt and
+Subject: [PATCH 43/51] vkd3d-shader/hlsl: Accept the fastopt and
  allow_uav_condition loop attributes.
 
 ---

@@ -1,7 +1,7 @@
 From 747515b6ef8713ebeb3e5128f4fc7997b293708b Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 16:20:55 +0200
-Subject: [PATCH 31/48] vkd3d-shader/hlsl: Fuse multiplications and additions
+Subject: [PATCH 31/51] vkd3d-shader/hlsl: Fuse multiplications and additions
  into mad.
 
 ---

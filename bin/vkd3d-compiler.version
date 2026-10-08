@@ -47,3 +47,6 @@ vkd3d-2.1-93-gcfcb4833
 0046-vkd3d-shader-Accept-the-l-suffix-on-floating-point-l.patch
 0047-vkd3d-shader-hlsl-Negate-in-the-type-of-the-subtract.patch
 0048-vkd3d-shader-ir-Do-not-make-booleans-of-conditions.patch
+0049-vkd3d-shader-hlsl-Put-the-code-that-tests-a-flag-whe.patch
+0050-vkd3d-shader-hlsl-Look-past-unused-values-when-threa.patch
+0051-vkd3d-shader-hlsl-Set-refactoringAllowed-unless-aske.patch

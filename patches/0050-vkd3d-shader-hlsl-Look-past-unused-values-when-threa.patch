@@ -1,0 +1,27 @@
+From 769838606370bb1f9c5d2fefceb72cf1d9408b66 Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Thu, 8 Oct 2026 03:34:17 +0200
+Subject: [PATCH 50/51] vkd3d-shader/hlsl: Look past unused values when
+ threading a flag test.
+
+---
+ libs/vkd3d-shader/hlsl_codegen.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/libs/vkd3d-shader/hlsl_codegen.c b/libs/vkd3d-shader/hlsl_codegen.c
+index 18a57007..11f4ba48 100644
+--- a/libs/vkd3d-shader/hlsl_codegen.c
++++ b/libs/vkd3d-shader/hlsl_codegen.c
+@@ -18883,6 +18883,9 @@ restart:
+             between = LIST_ENTRY(entry, struct hlsl_ir_node, entry);
+             if (between == iff->condition.node || between == first)
+                 continue;
++            if (list_empty(&between->uses) && (between->type == HLSL_IR_LOAD || between->type == HLSL_IR_CONSTANT
++                    || between->type == HLSL_IR_EXPR || between->type == HLSL_IR_SWIZZLE))
++                continue;
+             prev = between;
+             break;
+         }
+-- 
+2.53.0
+

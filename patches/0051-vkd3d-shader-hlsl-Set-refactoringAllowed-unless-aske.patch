@@ -1,0 +1,30 @@
+From f9be978caa954b95cdb8e2d97e8ec0c85b5a3cb0 Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Thu, 8 Oct 2026 03:48:44 +0200
+Subject: [PATCH 51/51] vkd3d-shader/hlsl: Set refactoringAllowed unless asked
+ for IEEE strictness.
+
+---
+ libs/vkd3d-shader/hlsl_codegen.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/libs/vkd3d-shader/hlsl_codegen.c b/libs/vkd3d-shader/hlsl_codegen.c
+index 11f4ba48..21564700 100644
+--- a/libs/vkd3d-shader/hlsl_codegen.c
++++ b/libs/vkd3d-shader/hlsl_codegen.c
+@@ -16510,6 +16510,12 @@ static void sm4_generate_vsir(struct hlsl_ctx *ctx,
+ 
+     generate_vsir_scan_required_features(ctx, program);
+     generate_vsir_scan_global_flags(ctx, program, func);
++    {
++        const char *env = getenv("VKD3D_HLSL_IEEE_STRICT");
++
++        if (!(env && !strcmp(env, "1")))
++            program->global_flags |= VKD3DSGF_REFACTORING_ALLOWED;
++    }
+ 
+     program->ssa_count = ctx->ssa_count;
+     program->temp_count = ctx->temp_count;
+-- 
+2.53.0
+

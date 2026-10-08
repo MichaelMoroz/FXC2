@@ -1,7 +1,7 @@
 From 421bf26aa9f3320e9372908cd62e0bdc63381bd8 Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 07:38:09 +0200
-Subject: [PATCH 14/48] vkd3d-shader/hlsl: Split struct variables into one
+Subject: [PATCH 14/51] vkd3d-shader/hlsl: Split struct variables into one
  variable per field.
 
 ---

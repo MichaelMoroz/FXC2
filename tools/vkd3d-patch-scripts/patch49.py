@@ -1,0 +1,357 @@
+import os
+p = os.path.expanduser("~/fxc2/vkd3d/libs/vkd3d-shader/hlsl_codegen.c")
+s = open(p).read()
+
+
+def rep(old, new):
+    global s
+    assert s.count(old) == 1, old[:70]
+    s = s.replace(old, new)
+
+
+PASS = r'''/* fxc2: tests of a flag go where the flag is set.
+ *
+ * A function that returns a bool is inlined as "the result is set, and then
+ * looked at":
+ *
+ *     if (bad) { result = false; } else { ...; result = true; }
+ *     if (!result) break;
+ *
+ * Every instruction the emulator ran paid for that twice over: the result was
+ * put in a register, tested, and what depended on it was selected. Where
+ * every way through the branch before the test leaves a constant in the flag,
+ * the tested code is put at the end of each of those ways instead (a copy of
+ * the side that applies), and the test goes:
+ *
+ *     if (bad) { result = false; break; } else { ...; result = true; }
+ *
+ * That is what a compiler with jumps does by threading them. The copies are
+ * limited in size (VKD3D_HLSL_THREAD_FLAGS, in instructions; 0 turns it off). */
+struct flag_leaves
+{
+    struct flag_leaf
+    {
+        struct hlsl_block *block;
+        bool value;
+    } *leaves;
+    size_t count, capacity;
+};
+
+static bool block_stores_var(const struct hlsl_block *block, const struct hlsl_ir_var *var)
+{
+    const struct hlsl_ir_node *instr;
+
+    LIST_FOR_EACH_ENTRY(instr, &block->instrs, struct hlsl_ir_node, entry)
+    {
+        if (instr->type == HLSL_IR_STORE)
+        {
+            if (hlsl_ir_store(instr)->lhs.var == var)
+                return true;
+        }
+        else if (instr->type == HLSL_IR_IF)
+        {
+            if (block_stores_var(&hlsl_ir_if(instr)->then_block, var)
+                    || block_stores_var(&hlsl_ir_if(instr)->else_block, var))
+                return true;
+        }
+        else if (instr->type == HLSL_IR_LOOP)
+        {
+            if (block_stores_var(&hlsl_ir_loop(instr)->body, var) || block_stores_var(&hlsl_ir_loop(instr)->iter, var))
+                return true;
+        }
+        else if (instr->type == HLSL_IR_SWITCH)
+        {
+            const struct hlsl_ir_switch_case *c;
+
+            LIST_FOR_EACH_ENTRY(c, &hlsl_ir_switch(instr)->cases, struct hlsl_ir_switch_case, entry)
+            {
+                if (block_stores_var(&c->body, var))
+                    return true;
+            }
+        }
+        else if (instr->type == HLSL_IR_CALL)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Finds the places at which control leaves "block" at its end, if each of them
+ * has a constant in "var" by then. A way that leaves through a jump does not
+ * get to the test and needs nothing. */
+static bool flag_collect_leaves(struct hlsl_ctx *ctx, struct hlsl_block *block, const struct hlsl_ir_var *var,
+        struct flag_leaves *leaves)
+{
+    struct hlsl_ir_node *instr;
+    bool trailing = false;
+
+    LIST_FOR_EACH_ENTRY_REV(instr, &block->instrs, struct hlsl_ir_node, entry)
+    {
+        switch (instr->type)
+        {
+            case HLSL_IR_STORE:
+            {
+                const struct hlsl_ir_store *store = hlsl_ir_store(instr);
+
+                if (store->lhs.var != var)
+                    break;
+                if (store->lhs.path_len || store->rhs.node->type != HLSL_IR_CONSTANT
+                        || store->rhs.node->data_type->class != HLSL_CLASS_SCALAR)
+                    return false;
+                if (!hlsl_array_reserve(ctx, (void **)&leaves->leaves, &leaves->capacity,
+                        leaves->count + 1, sizeof(*leaves->leaves)))
+                    return false;
+                leaves->leaves[leaves->count].block = block;
+                leaves->leaves[leaves->count].value = !!hlsl_ir_constant(store->rhs.node)->value.u[0].u;
+                ++leaves->count;
+                return true;
+            }
+
+            case HLSL_IR_IF:
+            {
+                struct hlsl_ir_if *iff = hlsl_ir_if(instr);
+
+                if (!block_stores_var(&iff->then_block, var) && !block_stores_var(&iff->else_block, var))
+                    break;
+                /* What follows the branch here would come to run after the
+                 * tested code instead of before it. */
+                if (trailing)
+                    return false;
+                return flag_collect_leaves(ctx, &iff->then_block, var, leaves)
+                        && flag_collect_leaves(ctx, &iff->else_block, var, leaves);
+            }
+
+            case HLSL_IR_JUMP:
+            {
+                enum hlsl_ir_jump_type type = hlsl_ir_jump(instr)->type;
+
+                if (!trailing && (type == HLSL_IR_JUMP_BREAK || type == HLSL_IR_JUMP_CONTINUE
+                        || type == HLSL_IR_JUMP_RETURN))
+                    return true;
+                break;
+            }
+
+            case HLSL_IR_LOOP:
+                if (block_stores_var(&hlsl_ir_loop(instr)->body, var) || block_stores_var(&hlsl_ir_loop(instr)->iter, var))
+                    return false;
+                break;
+
+            case HLSL_IR_SWITCH:
+            {
+                const struct hlsl_ir_switch_case *c;
+
+                LIST_FOR_EACH_ENTRY(c, &hlsl_ir_switch(instr)->cases, struct hlsl_ir_switch_case, entry)
+                {
+                    if (block_stores_var(&c->body, var))
+                        return false;
+                }
+                break;
+            }
+
+            case HLSL_IR_CALL:
+                return false;
+
+            default:
+                break;
+        }
+        trailing = true;
+    }
+    return false;
+}
+
+static unsigned int block_instr_count(const struct hlsl_block *block)
+{
+    const struct hlsl_ir_node *instr;
+    unsigned int count = 0;
+
+    LIST_FOR_EACH_ENTRY(instr, &block->instrs, struct hlsl_ir_node, entry)
+    {
+        ++count;
+        if (instr->type == HLSL_IR_IF)
+        {
+            count += block_instr_count(&hlsl_ir_if(instr)->then_block);
+            count += block_instr_count(&hlsl_ir_if(instr)->else_block);
+        }
+        else if (instr->type == HLSL_IR_LOOP)
+        {
+            count += block_instr_count(&hlsl_ir_loop(instr)->body);
+            count += block_instr_count(&hlsl_ir_loop(instr)->iter);
+        }
+        else if (instr->type == HLSL_IR_SWITCH)
+        {
+            const struct hlsl_ir_switch_case *c;
+
+            LIST_FOR_EACH_ENTRY(c, &hlsl_ir_switch(instr)->cases, struct hlsl_ir_switch_case, entry)
+                count += block_instr_count(&c->body);
+        }
+    }
+    return count;
+}
+
+/* If "instr" is "if (v)" or "if (!v)" for a variable, returns the variable. */
+static struct hlsl_ir_var *flag_test_var(struct hlsl_ir_if *iff, bool *negated, struct hlsl_ir_node **first)
+{
+    struct hlsl_ir_node *cond = iff->condition.node;
+    struct hlsl_ir_load *load;
+
+    *negated = false;
+    *first = cond;
+    if (cond->type == HLSL_IR_EXPR && hlsl_ir_expr(cond)->op == HLSL_OP1_LOGIC_NOT)
+    {
+        *negated = true;
+        cond = hlsl_ir_expr(cond)->operands[0].node;
+        *first = cond;
+    }
+    if (cond->type != HLSL_IR_LOAD)
+        return NULL;
+    load = hlsl_ir_load(cond);
+    if (load->src.path_len || load->src.var->data_type->class != HLSL_CLASS_SCALAR
+            || load->src.var->is_uniform || load->src.var->is_input_semantic)
+        return NULL;
+    return load->src.var;
+}
+
+static bool thread_flag_tests_block(struct hlsl_ctx *ctx, struct hlsl_block *block, unsigned int limit)
+{
+    struct hlsl_ir_node *instr, *next;
+    bool progress = false;
+
+restart:
+    LIST_FOR_EACH_ENTRY_SAFE(instr, next, &block->instrs, struct hlsl_ir_node, entry)
+    {
+        struct flag_leaves leaves = {0};
+        unsigned int then_size, else_size, true_count = 0, false_count = 0;
+        struct hlsl_ir_node *first, *prev, *between;
+        struct hlsl_ir_var *var;
+        struct hlsl_ir_if *iff;
+        struct list *entry;
+        bool negated, ok;
+        size_t i;
+
+        if (instr->type != HLSL_IR_IF)
+            continue;
+        iff = hlsl_ir_if(instr);
+        if (!(var = flag_test_var(iff, &negated, &first)))
+            continue;
+
+        /* Between the branch that sets the flag and this test there may only
+         * be what the test's condition is made of. */
+        if (!(entry = list_prev(&block->instrs, &instr->entry)))
+            continue;
+        ok = true;
+        prev = NULL;
+        for (; entry; entry = list_prev(&block->instrs, entry))
+        {
+            between = LIST_ENTRY(entry, struct hlsl_ir_node, entry);
+            if (between == iff->condition.node || between == first)
+                continue;
+            prev = between;
+            break;
+        }
+        if (!ok || !prev || prev->type != HLSL_IR_IF)
+            continue;
+        /* The load of the flag must come after that branch. */
+        {
+            bool load_after = false;
+
+            for (entry = list_next(&block->instrs, &prev->entry); entry && entry != &instr->entry;
+                    entry = list_next(&block->instrs, entry))
+            {
+                if (LIST_ENTRY(entry, struct hlsl_ir_node, entry) == first)
+                    load_after = true;
+            }
+            if (!load_after)
+                continue;
+        }
+
+        if (!flag_collect_leaves(ctx, &hlsl_ir_if(prev)->then_block, var, &leaves)
+                || !flag_collect_leaves(ctx, &hlsl_ir_if(prev)->else_block, var, &leaves))
+        {
+            vkd3d_free(leaves.leaves);
+            continue;
+        }
+        for (i = 0; i < leaves.count; ++i)
+        {
+            if (leaves.leaves[i].value != negated)
+                ++true_count;
+            else
+                ++false_count;
+        }
+        then_size = block_instr_count(&iff->then_block);
+        else_size = block_instr_count(&iff->else_block);
+        if (true_count * then_size + false_count * else_size > limit + then_size + else_size)
+        {
+            vkd3d_free(leaves.leaves);
+            continue;
+        }
+
+        for (i = 0; i < leaves.count; ++i)
+        {
+            const struct hlsl_block *src = leaves.leaves[i].value != negated ? &iff->then_block : &iff->else_block;
+            struct hlsl_block copy;
+
+            if (list_empty(&src->instrs))
+                continue;
+            if (!hlsl_clone_block(ctx, &copy, src))
+            {
+                vkd3d_free(leaves.leaves);
+                return progress;
+            }
+            hlsl_block_add_block(leaves.leaves[i].block, &copy);
+        }
+        vkd3d_free(leaves.leaves);
+
+        list_remove(&instr->entry);
+        hlsl_free_instr(instr);
+        progress = true;
+        goto restart;
+    }
+
+    LIST_FOR_EACH_ENTRY(instr, &block->instrs, struct hlsl_ir_node, entry)
+    {
+        if (instr->type == HLSL_IR_IF)
+        {
+            progress |= thread_flag_tests_block(ctx, &hlsl_ir_if(instr)->then_block, limit);
+            progress |= thread_flag_tests_block(ctx, &hlsl_ir_if(instr)->else_block, limit);
+        }
+        else if (instr->type == HLSL_IR_LOOP)
+        {
+            progress |= thread_flag_tests_block(ctx, &hlsl_ir_loop(instr)->body, limit);
+            progress |= thread_flag_tests_block(ctx, &hlsl_ir_loop(instr)->iter, limit);
+        }
+        else if (instr->type == HLSL_IR_SWITCH)
+        {
+            struct hlsl_ir_switch_case *c;
+
+            LIST_FOR_EACH_ENTRY(c, &hlsl_ir_switch(instr)->cases, struct hlsl_ir_switch_case, entry)
+                progress |= thread_flag_tests_block(ctx, &c->body, limit);
+        }
+    }
+    return progress;
+}
+
+static void thread_flag_tests(struct hlsl_ctx *ctx, struct hlsl_block *body)
+{
+    const char *env = getenv("VKD3D_HLSL_THREAD_FLAGS");
+    unsigned int limit = env ? strtoul(env, NULL, 0) : 64, rounds = 0;
+
+    if (!limit)
+        return;
+    while (thread_flag_tests_block(ctx, body, limit) && ++rounds < 16)
+        ;
+}
+
+'''
+anchor = "static void process_entry_function(struct hlsl_ctx *ctx, struct vsir_program *program,"
+rep(anchor, PASS + anchor)
+rep('''    if (hlsl_version_ge(ctx, 4, 0))
+        alias_inout_arrays(ctx, body);
+''', '''    if (hlsl_version_ge(ctx, 4, 0))
+        alias_inout_arrays(ctx, body);
+
+    if (hlsl_version_ge(ctx, 4, 0))
+        thread_flag_tests(ctx, body);
+''')
+open(p, "w").write(s)
+print("patched")
