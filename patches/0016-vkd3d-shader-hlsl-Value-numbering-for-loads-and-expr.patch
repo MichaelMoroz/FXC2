@@ -1,7 +1,7 @@
 From 4bd0b51b179a9a12b05325abbbe9147d2f94d016 Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 07:46:10 +0200
-Subject: [PATCH 16/47] vkd3d-shader/hlsl: Value numbering for loads and
+Subject: [PATCH 16/48] vkd3d-shader/hlsl: Value numbering for loads and
  expressions.
 
 ---

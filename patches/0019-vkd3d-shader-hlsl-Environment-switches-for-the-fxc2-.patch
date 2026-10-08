@@ -1,7 +1,7 @@
 From a6f2a6c2a5712ab68f1042527b6754feab7a48b7 Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 07:53:56 +0200
-Subject: [PATCH 19/47] vkd3d-shader/hlsl: Environment switches for the fxc2
+Subject: [PATCH 19/48] vkd3d-shader/hlsl: Environment switches for the fxc2
  optimisations.
 
 ---

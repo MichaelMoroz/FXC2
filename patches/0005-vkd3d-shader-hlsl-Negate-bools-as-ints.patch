@@ -1,7 +1,7 @@
 From bd8fa5abcf7ff4fd507d69b286e9a7d9707c6f01 Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 06:44:48 +0200
-Subject: [PATCH 05/47] vkd3d-shader/hlsl: Negate bools as ints.
+Subject: [PATCH 05/48] vkd3d-shader/hlsl: Negate bools as ints.
 
 ---
  libs/vkd3d-shader/hlsl.y | 13 +++++++++++++

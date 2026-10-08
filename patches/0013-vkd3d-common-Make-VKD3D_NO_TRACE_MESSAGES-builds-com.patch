@@ -1,7 +1,7 @@
 From e48c334b62250dd1275abb4ff50962fad20b131d Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 07:27:35 +0200
-Subject: [PATCH 13/47] vkd3d-common: Make VKD3D_NO_TRACE_MESSAGES builds
+Subject: [PATCH 13/48] vkd3d-common: Make VKD3D_NO_TRACE_MESSAGES builds
  compile.
 
 ---

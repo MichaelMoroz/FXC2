@@ -46,3 +46,4 @@ vkd3d-2.1-93-gcfcb4833
 0045-vkd3d-shader-hlsl-Compile-time-on-very-large-shaders.patch
 0046-vkd3d-shader-Accept-the-l-suffix-on-floating-point-l.patch
 0047-vkd3d-shader-hlsl-Negate-in-the-type-of-the-subtract.patch
+0048-vkd3d-shader-ir-Do-not-make-booleans-of-conditions.patch

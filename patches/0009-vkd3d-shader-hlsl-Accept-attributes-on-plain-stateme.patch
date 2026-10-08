@@ -1,7 +1,7 @@
 From 98abe27892ef80a02a7612bf699c4afe5083b218 Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 07:06:51 +0200
-Subject: [PATCH 09/47] vkd3d-shader/hlsl: Accept attributes on plain
+Subject: [PATCH 09/48] vkd3d-shader/hlsl: Accept attributes on plain
  statements and switch cases ending in an if that always leaves.
 
 ---

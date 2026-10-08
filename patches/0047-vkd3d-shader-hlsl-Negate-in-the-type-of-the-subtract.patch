@@ -1,7 +1,7 @@
 From ac50edee4ee6d723f4c53898c6be34deaf39932f Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 23:49:31 +0200
-Subject: [PATCH 47/47] vkd3d-shader/hlsl: Negate in the type of the
+Subject: [PATCH 47/48] vkd3d-shader/hlsl: Negate in the type of the
  subtraction (float minus unsigned).
 
 ---
