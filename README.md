@@ -15,7 +15,7 @@ DXIL or SPIR-V, which D3D11, and so Unity's built-in pipeline and VRChat, cannot
 load.
 
 fxc2 is a second compiler for the same bytecode: vkd3d's HLSL compiler (the
-one Wine uses) with 60 patches, packaged as a command line and as a drop-in
+one Wine uses) with 61 patches, packaged as a command line and as a drop-in
 `d3dcompiler_47.dll`. What comes out is ordinary DXBC. Whoever runs the result
 needs nothing: a Unity build or a VRChat world made with it contains the
 bytecode, not the compiler.
@@ -164,7 +164,7 @@ This repo packages that as:
 | `bin/vkd3d-compiler.exe` | Upstream vkd3d CLI (also does DXBC → SPIR-V/GLSL/MSL/asm). |
 | `tools/hlsl2dxbc.py` | Front-end chooser: `direct`, via Slang, via DXC + SPIRV-Cross, or `auto`. |
 | `bin/unity/` | The pair of DLLs Unity needs: a loader-proof stub named `D3DCompiler_47.dll` plus the real compiler as `fxc2_d3dcompiler.dll` (see Unity below). |
-| `patches/` | 60 patches on top of upstream vkd3d (see below); `tools/vkd3d-patch-scripts/` has the scripts they were made with. |
+| `patches/` | 61 patches on top of upstream vkd3d (see below); `tools/vkd3d-patch-scripts/` has the scripts they were made with. |
 | `tools/replay.py` | Recompiles sources the DLL captured (a Unity project's, say) with and without the optimisations and with FXC, and compares. |
 | `shaderemu/rvc_opt-fxc2.patch` | The changes to ShaderEmu's shader described under "The emulator shader" (merged there since). |
 | `tools/unity_render_shaders.cs`, `tools/compare_images.py` | Render every shader in a Unity folder with fxc2 and with the stock compiler, and compare the pictures. |
@@ -721,6 +721,12 @@ Patches 30 to 42:
     each again. With 59, ShaderEmu's tick compiles in 5.3 s instead of 7.1 s and a heavy
     Poiyomi variant in 9.0 s instead of 11.8 s; the bytecode is the same but for the
     numbering of registers in the tick.
+61. Compile time: the initialiser of each component of a variable is a constant expression
+    that loads a temporary of its own, and for that every static initialiser of the shader
+    was cloned and folded with it. Now only for an expression that loads a variable of the
+    program. With 59 to 61, sixteen Poiyomi pixel shaders compile in 120 s instead of 180 s
+    (each between 0.4 and 15 s); six have the same bytecode, seven the same instructions
+    with other register numbers and three one `mov` fewer.
 
 ## Approaches that do not work
 

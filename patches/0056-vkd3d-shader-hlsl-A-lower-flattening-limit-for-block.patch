@@ -1,7 +1,7 @@
 From 80d1fcff902e029e492adb3a86d79d56e21fde27 Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Fri, 9 Oct 2026 06:29:11 +0200
-Subject: [PATCH 56/60] vkd3d-shader/hlsl: A lower flattening limit for blocks
+Subject: [PATCH 56/61] vkd3d-shader/hlsl: A lower flattening limit for blocks
  that compute in floating point.
 
 ---

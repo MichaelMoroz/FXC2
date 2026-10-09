@@ -1,7 +1,7 @@
 From 4de671cacc3a001fc16f031890dec00c43190b2e Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Fri, 9 Oct 2026 08:01:28 +0200
-Subject: [PATCH 59/60] Copy propagation summarises the stores of a block once
+Subject: [PATCH 59/61] Copy propagation summarises the stores of a block once
  per pass.
 
 ---

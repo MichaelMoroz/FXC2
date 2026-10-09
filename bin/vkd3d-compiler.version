@@ -59,3 +59,4 @@ vkd3d-2.1-93-gcfcb4833
 0058-vkd3d-shader-hlsl-c-a-b-is-mad-a-b-c.patch
 0059-Copy-propagation-summarises-the-stores-of-a-block-on.patch
 0060-The-expression-folding-passes-in-one-walk-of-the-pro.patch
+0061-Static-initialisers-are-only-cloned-for-an-expressio.patch

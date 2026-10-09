@@ -1,7 +1,7 @@
 From e984a7e5fc3987cd24f23abbea991998e71a5fa1 Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 22:18:12 +0200
-Subject: [PATCH 45/60] vkd3d-shader/hlsl: Compile time on very large shaders.
+Subject: [PATCH 45/61] vkd3d-shader/hlsl: Compile time on very large shaders.
 
 ---
  libs/vkd3d-shader/hlsl_codegen.c | 17 ++++++++++++-----

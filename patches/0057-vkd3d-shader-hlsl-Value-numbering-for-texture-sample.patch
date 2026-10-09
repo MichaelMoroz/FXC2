@@ -1,7 +1,7 @@
 From cf1626b9aeaa51fc9e2896a1fec58b14bfa4418c Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Fri, 9 Oct 2026 06:37:43 +0200
-Subject: [PATCH 57/60] vkd3d-shader/hlsl: Value numbering for texture samples.
+Subject: [PATCH 57/61] vkd3d-shader/hlsl: Value numbering for texture samples.
 
 ---
  libs/vkd3d-shader/hlsl_codegen.c | 78 ++++++++++++++++++++++++++++++++

@@ -1,7 +1,7 @@
 From 56273f3bdaa9bc088e6a9afb9955e6a28632086c Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Fri, 9 Oct 2026 08:02:48 +0200
-Subject: [PATCH 60/60] The expression folding passes in one walk of the
+Subject: [PATCH 60/61] The expression folding passes in one walk of the
  program.
 
 ---
