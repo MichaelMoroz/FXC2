@@ -1,7 +1,7 @@
 From 1a130dbc0a71336df1ddd2943e2a4b8215ef7785 Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Thu, 8 Oct 2026 06:35:33 +0200
-Subject: [PATCH 52/57] vkd3d-shader/preproc: Hexadecimal digits end at F.
+Subject: [PATCH 52/58] vkd3d-shader/preproc: Hexadecimal digits end at F.
 
 ---
  libs/vkd3d-shader/preproc.l | 2 +-

@@ -1,7 +1,7 @@
 From 163f6ba5261c02ce668c54fd94cb5ed253adf40b Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 16:55:14 +0200
-Subject: [PATCH 33/57] vkd3d-shader/hlsl: Remove dead code by liveness, fold
+Subject: [PATCH 33/58] vkd3d-shader/hlsl: Remove dead code by liveness, fold
  dot() with zero.
 
 ---

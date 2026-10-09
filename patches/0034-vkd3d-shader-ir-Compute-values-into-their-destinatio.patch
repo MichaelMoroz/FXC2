@@ -1,7 +1,7 @@
 From 08bc1af95135f786bcd94bc59aa3b5c195501c24 Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 17:03:07 +0200
-Subject: [PATCH 34/57] vkd3d-shader/ir: Compute values into their destination,
+Subject: [PATCH 34/58] vkd3d-shader/ir: Compute values into their destination,
  read variables in place.
 
 ---

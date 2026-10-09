@@ -1,7 +1,7 @@
 From d1b7a897d9a9ec76b781a9ade5a61a5ec146b36c Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 05:08:37 +0200
-Subject: [PATCH 01/57] vkd3d-shader/hlsl: Do not implicitly unroll SM4+ loops.
+Subject: [PATCH 01/58] vkd3d-shader/hlsl: Do not implicitly unroll SM4+ loops.
 
 ---
  libs/vkd3d-shader/hlsl_codegen.c | 15 +++++++++++++++

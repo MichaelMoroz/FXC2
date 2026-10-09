@@ -1,7 +1,7 @@
 From 3fd8fd02fdb50257e9d89d92c8a74f83152d4d49 Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 08:20:31 +0200
-Subject: [PATCH 26/57] vkd3d-shader/hlsl: Let if chains made from switches be
+Subject: [PATCH 26/58] vkd3d-shader/hlsl: Let if chains made from switches be
  flattened.
 
 ---
