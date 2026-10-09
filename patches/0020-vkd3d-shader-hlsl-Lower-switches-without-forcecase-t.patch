@@ -1,7 +1,7 @@
 From f1e412c89db9ab40e72b8769408e622b9bfce3f0 Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 08:01:01 +0200
-Subject: [PATCH 20/56] vkd3d-shader/hlsl: Lower switches without [forcecase]
+Subject: [PATCH 20/57] vkd3d-shader/hlsl: Lower switches without [forcecase]
  to if/else chains.
 
 ---

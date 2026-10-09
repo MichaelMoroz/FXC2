@@ -1,0 +1,115 @@
+From cf1626b9aeaa51fc9e2896a1fec58b14bfa4418c Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Fri, 9 Oct 2026 06:37:43 +0200
+Subject: [PATCH 57/57] vkd3d-shader/hlsl: Value numbering for texture samples.
+
+---
+ libs/vkd3d-shader/hlsl_codegen.c | 78 ++++++++++++++++++++++++++++++++
+ 1 file changed, 78 insertions(+)
+
+diff --git a/libs/vkd3d-shader/hlsl_codegen.c b/libs/vkd3d-shader/hlsl_codegen.c
+index d8c56488..604bb61c 100644
+--- a/libs/vkd3d-shader/hlsl_codegen.c
++++ b/libs/vkd3d-shader/hlsl_codegen.c
+@@ -8077,6 +8077,52 @@ static uint64_t lvn_constant_bits(const struct hlsl_ir_node *instr, unsigned int
+     return bits;
+ }
+ 
++/* fxc2: a texture sample is the dearest thing a material shader does, and
++ * inlined helpers ask for the same one again (a Poiyomi variant had 35 where
++ * FXC's build has 30). Sampling is of read-only textures, so two samples of
++ * one texture with one sampler at the same coordinates are one value. Loads
++ * are left alone: a Load may be of something the shader writes. */
++static bool lvn_resource_load_is_pure(const struct hlsl_ir_resource_load *load)
++{
++    switch (load->load_type)
++    {
++        case HLSL_RESOURCE_SAMPLE:
++        case HLSL_RESOURCE_SAMPLE_CMP:
++        case HLSL_RESOURCE_SAMPLE_CMP_LZ:
++        case HLSL_RESOURCE_SAMPLE_GRAD:
++        case HLSL_RESOURCE_SAMPLE_LOD:
++        case HLSL_RESOURCE_SAMPLE_LOD_BIAS:
++            break;
++
++        default:
++            return false;
++    }
++    return load->resource.var && load->resource.var->is_uniform
++            && load->sampler.var && load->sampler.var->is_uniform;
++}
++
++static const struct hlsl_src *lvn_resource_load_src(const struct hlsl_ir_resource_load *load, unsigned int i)
++{
++    const struct hlsl_src *srcs[] = {&load->byte_offset, &load->coords, &load->lod, &load->ddx, &load->ddy,
++            &load->cmp, &load->sample_index, &load->texel_offset};
++
++    return i < ARRAY_SIZE(srcs) ? srcs[i] : NULL;
++}
++
++static bool lvn_derefs_equal(const struct hlsl_deref *a, const struct hlsl_deref *b)
++{
++    unsigned int i;
++
++    if (a->var != b->var || a->path_len != b->path_len)
++        return false;
++    for (i = 0; i < a->path_len; ++i)
++    {
++        if (a->path[i].node != b->path[i].node)
++            return false;
++    }
++    return true;
++}
++
+ /* Whether the node is of a kind this pass handles, and its hash if so. */
+ static bool lvn_hash_node(const struct hlsl_ir_node *instr, uint32_t *hash)
+ {
+@@ -8132,6 +8178,21 @@ static bool lvn_hash_node(const struct hlsl_ir_node *instr, uint32_t *hash)
+             break;
+         }
+ 
++        case HLSL_IR_RESOURCE_LOAD:
++        {
++            const struct hlsl_ir_resource_load *load = hlsl_ir_resource_load(instr);
++            const struct hlsl_src *src;
++
++            if (!lvn_resource_load_is_pure(load))
++                return false;
++            h = lvn_hash_combine(h, load->load_type * 16 + load->sampling_dim);
++            h = lvn_hash_combine(h, (uintptr_t)load->resource.var);
++            h = lvn_hash_combine(h, (uintptr_t)load->sampler.var);
++            for (i = 0; (src = lvn_resource_load_src(load, i)); ++i)
++                h = lvn_hash_combine(h, (uintptr_t)src->node);
++            break;
++        }
++
+         default:
+             return false;
+     }
+@@ -8185,6 +8246,23 @@ static bool lvn_nodes_equal(const struct hlsl_ir_node *a, const struct hlsl_ir_n
+             return true;
+         }
+ 
++        case HLSL_IR_RESOURCE_LOAD:
++        {
++            const struct hlsl_ir_resource_load *la = hlsl_ir_resource_load(a), *lb = hlsl_ir_resource_load(b);
++            const struct hlsl_src *src;
++
++            if (la->load_type != lb->load_type || la->sampling_dim != lb->sampling_dim
++                    || !lvn_derefs_equal(&la->resource, &lb->resource)
++                    || !lvn_derefs_equal(&la->sampler, &lb->sampler))
++                return false;
++            for (i = 0; (src = lvn_resource_load_src(la, i)); ++i)
++            {
++                if (src->node != lvn_resource_load_src(lb, i)->node)
++                    return false;
++            }
++            return true;
++        }
++
+         default:
+             return false;
+     }
+-- 
+2.53.0
+

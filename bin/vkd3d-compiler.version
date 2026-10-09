@@ -55,3 +55,4 @@ vkd3d-2.1-93-gcfcb4833
 0054-vkd3d-shader-hlsl-Do-not-flatten-a-branch-on-uniform.patch
 0055-vkd3d-shader-A-sine-is-not-an-addition-when-flatteni.patch
 0056-vkd3d-shader-hlsl-A-lower-flattening-limit-for-block.patch
+0057-vkd3d-shader-hlsl-Value-numbering-for-texture-sample.patch

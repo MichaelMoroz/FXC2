@@ -15,7 +15,7 @@ DXIL or SPIR-V, which D3D11, and so Unity's built-in pipeline and VRChat, cannot
 load.
 
 fxc2 is a second compiler for the same bytecode: vkd3d's HLSL compiler (the
-one Wine uses) with 56 patches, packaged as a command line and as a drop-in
+one Wine uses) with 57 patches, packaged as a command line and as a drop-in
 `d3dcompiler_47.dll`. What comes out is ordinary DXBC. Whoever runs the result
 needs nothing: a Unity build or a VRChat world made with it contains the
 bytecode, not the compiler.
@@ -164,7 +164,7 @@ This repo packages that as:
 | `bin/vkd3d-compiler.exe` | Upstream vkd3d CLI (also does DXBC → SPIR-V/GLSL/MSL/asm). |
 | `tools/hlsl2dxbc.py` | Front-end chooser: `direct`, via Slang, via DXC + SPIRV-Cross, or `auto`. |
 | `bin/unity/` | The pair of DLLs Unity needs: a loader-proof stub named `D3DCompiler_47.dll` plus the real compiler as `fxc2_d3dcompiler.dll` (see Unity below). |
-| `patches/` | 56 patches on top of upstream vkd3d (see below); `tools/vkd3d-patch-scripts/` has the scripts they were made with. |
+| `patches/` | 57 patches on top of upstream vkd3d (see below); `tools/vkd3d-patch-scripts/` has the scripts they were made with. |
 | `tools/replay.py` | Recompiles sources the DLL captured (a Unity project's, say) with and without the optimisations and with FXC, and compares. |
 | `shaderemu/rvc_opt-fxc2.patch` | The changes to ShaderEmu's shader described under "The emulator shader" (merged there since). |
 | `tools/unity_render_shaders.cs`, `tools/compare_images.py` | Render every shader in a Unity folder with fxc2 and with the stock compiler, and compare the pictures. |
@@ -464,7 +464,7 @@ pixel) is where to look next.
 
 It was looked at (patches 54 to 56): that family ran 46 small branches as selects, and what
 fed them for every pixel. The table above is from before those patches; a subset of twelve
-of the heavy variants, chosen across its range, now has a mean of 1.03 where it had 1.11.
+of the heavy variants, chosen across its range, now has a mean of 1.02 where it had 1.11.
 The whole set has not been timed again.
 
 Pixel shader output: 248 of 252 the same to 0.1%. Of the four that differ, one
@@ -698,6 +698,11 @@ Patches 30 to 42:
     FXC's GPU time to 1.07 by this; twelve heavy variants spread over the earlier results,
     from a mean of 1.11 to 1.03 (the slowest family from 1.40-1.50 to 1.02-1.07), with all
     twelve outputs the same as FXC's. ShaderEmu's tick, which is integer code, is unchanged.
+    With the weights of 55 the limit still cannot be higher: at 7 that variant is back at
+    1.53. What costs is not what the block computes but what feeds it.
+57. Value numbering takes texture samples too (one texture, one sampler, the same
+    coordinates: one sample). On Poiyomi's variants it found none to merge at run time: the
+    samples the bytecode has more of than FXC's are copies in the two arms of a branch.
 
 ## Approaches that do not work
 

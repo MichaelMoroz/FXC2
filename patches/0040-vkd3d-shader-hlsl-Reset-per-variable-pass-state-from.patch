@@ -1,7 +1,7 @@
 From fb241282baaa66d7300cf05843bfdf0611620aa3 Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 20:22:18 +0200
-Subject: [PATCH 40/56] vkd3d-shader/hlsl: Reset per-variable pass state from
+Subject: [PATCH 40/57] vkd3d-shader/hlsl: Reset per-variable pass state from
  the code, not the scopes.
 
 ---
