@@ -465,7 +465,12 @@ pixel) is where to look next.
 It was looked at (patches 54 to 56): that family ran 46 small branches as selects, and what
 fed them for every pixel. The table above is from before those patches; a subset of twelve
 of the heavy variants, chosen across its range, now has a mean of 1.02 where it had 1.11.
-The whole set has not been timed again.
+The 65 heavy pixel shaders of the whole set, timed again with patch 57: a mean of 1.05
+where it was 1.09 (17 faster than FXC's build, 11 within 3%, 37 slower; 64 of 65 outputs the
+same, the one that differs being the one that differed before). The subset has four of the
+nine shaders of the slow family in its twelve, which is why it gained more. A single
+shader's figure moves by 5% from one run to the next, and one read 1.81 in that run and
+0.94 alone.
 
 Pixel shader output: 248 of 252 the same to 0.1%. Of the four that differ, one
 is Unity's UI shader (twice), whose gradient lookup multiplies sampled values
