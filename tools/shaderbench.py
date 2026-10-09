@@ -73,7 +73,8 @@ def compile_cached(build, fxc, source_bytes, profile, entry, compat, source_path
     """Returns the path of the bytecode, or None when the compiler refused."""
     tool = FXC2 if build == "fxc2" else fxc
     key = hashlib.sha1(b"|".join([source_bytes, build.encode(), profile.encode(), entry.encode(),
-                                  b"1" if compat else b"0", tool_stamp(tool).encode()])).hexdigest()
+                                  b"1" if compat else b"0", tool_stamp(tool).encode(),
+                                  os.environ.get("SHADERBENCH_VARIANT", "").encode()])).hexdigest()
     out = os.path.join(CACHE, key + ".dxbc")
     with _locks_guard:
         lock = _locks.setdefault(key, threading.Lock())

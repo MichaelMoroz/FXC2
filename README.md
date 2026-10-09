@@ -15,7 +15,7 @@ DXIL or SPIR-V, which D3D11, and so Unity's built-in pipeline and VRChat, cannot
 load.
 
 fxc2 is a second compiler for the same bytecode: vkd3d's HLSL compiler (the
-one Wine uses) with 52 patches, packaged as a command line and as a drop-in
+one Wine uses) with 56 patches, packaged as a command line and as a drop-in
 `d3dcompiler_47.dll`. What comes out is ordinary DXBC. Whoever runs the result
 needs nothing: a Unity build or a VRChat world made with it contains the
 bytecode, not the compiler.
@@ -164,7 +164,7 @@ This repo packages that as:
 | `bin/vkd3d-compiler.exe` | Upstream vkd3d CLI (also does DXBC → SPIR-V/GLSL/MSL/asm). |
 | `tools/hlsl2dxbc.py` | Front-end chooser: `direct`, via Slang, via DXC + SPIRV-Cross, or `auto`. |
 | `bin/unity/` | The pair of DLLs Unity needs: a loader-proof stub named `D3DCompiler_47.dll` plus the real compiler as `fxc2_d3dcompiler.dll` (see Unity below). |
-| `patches/` | 52 patches on top of upstream vkd3d (see below); `tools/vkd3d-patch-scripts/` has the scripts they were made with. |
+| `patches/` | 56 patches on top of upstream vkd3d (see below); `tools/vkd3d-patch-scripts/` has the scripts they were made with. |
 | `tools/replay.py` | Recompiles sources the DLL captured (a Unity project's, say) with and without the optimisations and with FXC, and compares. |
 | `shaderemu/rvc_opt-fxc2.patch` | The changes to ShaderEmu's shader described under "The emulator shader" (merged there since). |
 | `tools/unity_render_shaders.cs`, `tools/compare_images.py` | Render every shader in a Unity folder with fxc2 and with the stock compiler, and compare the pictures. |
@@ -462,6 +462,11 @@ of 65 slower, 20 faster; from 0.84x to 1.53x) and 9% faster than what FXC
 produces when told not to optimise. The slowest family (2.0 against 3.0 ns a
 pixel) is where to look next.
 
+It was looked at (patches 54 to 56): that family ran 46 small branches as selects, and what
+fed them for every pixel. The table above is from before those patches; a subset of twelve
+of the heavy variants, chosen across its range, now has a mean of 1.03 where it had 1.11.
+The whole set has not been timed again.
+
 Pixel shader output: 248 of 252 the same to 0.1%. Of the four that differ, one
 is Unity's UI shader (twice), whose gradient lookup multiplies sampled values
 up to 65,000 and uses the result as a texture coordinate, so that a
@@ -676,6 +681,23 @@ Patches 30 to 42:
     for them took digits up to `f` from `A`, which takes in `[`, `]`, `^` and `_`. In a
     macro's last argument, `xr[(w >> 20) & 0x1f]` never closed its bracket and the macro was
     left unexpanded ("identifier is not declared"). `tests/shaders/macro_hex_ps.hlsl`.
+53. A shift and a mask of one word become one `ubfe`, as FXC writes them. Off unless
+    `VKD3D_UBFE=1`: on ShaderEmu's tick it changed nothing that could be measured.
+54. A branch whose condition is made of uniforms and constants alone is never flattened: the
+    GPU takes it the same way for a whole draw (`VKD3D_HLSL_FLATTEN_UNIFORM=1` flattens them
+    like any other).
+55. When deciding whether a block is small enough to flatten, a sine, cosine, logarithm or
+    exponential counts for six operations and a division, square root or reciprocal for
+    three. And `sin(x)` and `cos(x)` of one value are one `sincos` with two results, as FXC
+    writes them (108 to 65 `sincos` in a Poiyomi variant; FXC: 57; `VKD3D_MERGE_SINCOS=0`).
+56. **A lower flattening limit for floating point.** A block that computes in floating point
+    is flattened only up to 4 operations (`VKD3D_HLSL_FLATTEN_FLOAT`), integer blocks up to
+    10 as before. Material shaders switch effects with `if (feature) colour = effect;`: as a
+    select, everything the effect needed is computed for every pixel, and the driver can no
+    longer leave it out when the feature is off. One Poiyomi variant went from 1.50 times
+    FXC's GPU time to 1.07 by this; twelve heavy variants spread over the earlier results,
+    from a mean of 1.11 to 1.03 (the slowest family from 1.40-1.50 to 1.02-1.07), with all
+    twelve outputs the same as FXC's. ShaderEmu's tick, which is integer code, is unchanged.
 
 ## Approaches that do not work
 

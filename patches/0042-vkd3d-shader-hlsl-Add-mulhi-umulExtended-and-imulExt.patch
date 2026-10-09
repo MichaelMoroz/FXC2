@@ -1,7 +1,7 @@
 From 5a850bc848c79a637215e2973dc394ae4ae0ca47 Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 20:35:18 +0200
-Subject: [PATCH 42/52] vkd3d-shader/hlsl: Add mulhi(), umulExtended() and
+Subject: [PATCH 42/56] vkd3d-shader/hlsl: Add mulhi(), umulExtended() and
  imulExtended().
 
 ---

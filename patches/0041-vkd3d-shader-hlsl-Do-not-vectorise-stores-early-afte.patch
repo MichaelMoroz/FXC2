@@ -1,7 +1,7 @@
 From d2b0872e09f0e54408e54046748ba7c9b0d8d437 Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 20:30:23 +0200
-Subject: [PATCH 41/52] vkd3d-shader/hlsl: Do not vectorise stores early after
+Subject: [PATCH 41/56] vkd3d-shader/hlsl: Do not vectorise stores early after
  dead code removal.
 
 ---

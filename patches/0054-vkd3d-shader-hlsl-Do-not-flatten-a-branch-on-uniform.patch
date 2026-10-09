@@ -1,0 +1,99 @@
+From 6a7721ac77adde0648f40ccbe9bd97f0ad283a6b Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Fri, 9 Oct 2026 06:16:00 +0200
+Subject: [PATCH 54/56] vkd3d-shader/hlsl: Do not flatten a branch on uniforms
+ alone.
+
+---
+ libs/vkd3d-shader/hlsl_codegen.c | 53 +++++++++++++++++++++++++++++++-
+ libs/vkd3d-shader/ir.c           |  3 +-
+ 2 files changed, 54 insertions(+), 2 deletions(-)
+
+diff --git a/libs/vkd3d-shader/hlsl_codegen.c b/libs/vkd3d-shader/hlsl_codegen.c
+index 21564700..dbbb47ed 100644
+--- a/libs/vkd3d-shader/hlsl_codegen.c
++++ b/libs/vkd3d-shader/hlsl_codegen.c
+@@ -5588,6 +5588,56 @@ static bool lower_conditional_block_instrs(struct hlsl_ctx *ctx, struct hlsl_ir_
+             || lower_conditional_block_discard_neg(ctx, instr, flatten_ctx->cond, flatten_ctx->is_then);
+ }
+ 
++/* fxc2: whether a condition is made of uniforms and constants alone, so that
++ * every pixel of a draw takes the branch the same way. */
++static bool condition_is_uniform(const struct hlsl_ir_node *node, unsigned int depth)
++{
++    unsigned int i;
++
++    if (depth > 12)
++        return false;
++    switch (node->type)
++    {
++        case HLSL_IR_CONSTANT:
++            return true;
++
++        case HLSL_IR_LOAD:
++            return hlsl_ir_load(node)->src.var->is_uniform;
++
++        case HLSL_IR_SWIZZLE:
++            return condition_is_uniform(hlsl_ir_swizzle(node)->val.node, depth + 1);
++
++        case HLSL_IR_EXPR:
++            for (i = 0; i < HLSL_MAX_OPERANDS; ++i)
++            {
++                const struct hlsl_ir_node *operand = hlsl_ir_expr(node)->operands[i].node;
++
++                if (operand && !condition_is_uniform(operand, depth + 1))
++                    return false;
++            }
++            return true;
++
++        default:
++            return false;
++    }
++}
++
++/* fxc2: "if (_FeatureOn) colour = effect;" is how a material shader switches
++ * its features, and as a branch it costs nothing: the GPU takes it the same
++ * way for a whole draw and skips what only the effect needed. As a select the
++ * effect is computed for every pixel whether it is used or not (Poiyomi's
++ * heaviest variants ran 1.5 times FXC's time for 46 such branches). So a
++ * branch on uniforms alone is kept; VKD3D_HLSL_FLATTEN_UNIFORM=1 flattens
++ * them like any other. */
++static bool keep_uniform_branches(void)
++{
++    static int keep = -1;
++
++    if (keep < 0)
++        keep = !hlsl_tuning_enabled("VKD3D_HLSL_FLATTEN_UNIFORM", false);
++    return keep;
++}
++
+ static bool flatten_conditional_branches(struct hlsl_ctx *ctx, struct hlsl_ir_node *instr, void *context)
+ {
+     struct flatten_conditional_block_ctx flatten_ctx;
+@@ -5610,7 +5660,8 @@ static bool flatten_conditional_branches(struct hlsl_ctx *ctx, struct hlsl_ir_no
+                 || !can_flatten_conditional_block(ctx, &iff->else_block))
+             return false;
+     }
+-    else if (!is_conditional_block_simple(&iff->then_block) || !is_conditional_block_simple(&iff->else_block))
++    else if ((keep_uniform_branches() && condition_is_uniform(iff->condition.node, 0))
++            || !is_conditional_block_simple(&iff->then_block) || !is_conditional_block_simple(&iff->else_block))
+     {
+         /* Only flatten simple blocks by default. */
+         return false;
+diff --git a/libs/vkd3d-shader/ir.c b/libs/vkd3d-shader/ir.c
+index 461be2c4..6c5a8fde 100644
+--- a/libs/vkd3d-shader/ir.c
++++ b/libs/vkd3d-shader/ir.c
+@@ -13386,7 +13386,8 @@ static void vsir_program_fold_bitfield_extracts(struct vsir_program *program, st
+ {
+     const char *env;
+ 
+-    if (program->shader_version.major < 5 || ((env = getenv("VKD3D_UBFE")) && !strcmp(env, "0")))
++    /* Off unless asked for: on ShaderEmu's tick it changed nothing that could be measured. */
++    if (program->shader_version.major < 5 || !(env = getenv("VKD3D_UBFE")) || strcmp(env, "1"))
+         return;
+ 
+     for (unsigned int i = 0; i < count; ++i)
+-- 
+2.53.0
+

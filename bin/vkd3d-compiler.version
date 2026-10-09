@@ -51,3 +51,7 @@ vkd3d-2.1-93-gcfcb4833
 0050-vkd3d-shader-hlsl-Look-past-unused-values-when-threa.patch
 0051-vkd3d-shader-hlsl-Set-refactoringAllowed-unless-aske.patch
 0052-vkd3d-shader-preproc-Hexadecimal-digits-end-at-F.patch
+0053-vkd3d-shader-ir-A-shift-and-a-mask-are-one-ubfe-in-s.patch
+0054-vkd3d-shader-hlsl-Do-not-flatten-a-branch-on-uniform.patch
+0055-vkd3d-shader-A-sine-is-not-an-addition-when-flatteni.patch
+0056-vkd3d-shader-hlsl-A-lower-flattening-limit-for-block.patch

@@ -1,7 +1,7 @@
 From 90b18f246aa202df166b643c568e4ffe938b9b19 Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Thu, 8 Oct 2026 03:18:37 +0200
-Subject: [PATCH 49/52] vkd3d-shader/hlsl: Put the code that tests a flag where
+Subject: [PATCH 49/56] vkd3d-shader/hlsl: Put the code that tests a flag where
  the flag is set.
 
 ---
