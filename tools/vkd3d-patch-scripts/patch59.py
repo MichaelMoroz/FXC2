@@ -1,0 +1,484 @@
+import os
+base = os.path.expanduser("~/fxc2/vkd3d/libs/vkd3d-shader/")
+p = base + "hlsl.h"
+s = open(p).read()
+
+
+def rep(old, new):
+    global s
+    assert s.count(old) == 1, old[:70]
+    s = s.replace(old, new)
+
+
+rep('''    /* fxc2: bumped by every store to the variable while value numbering,
+     * see lvn_execute(). */
+    unsigned int lvn_generation;
+''', '''    /* fxc2: bumped by every store to the variable while value numbering,
+     * see lvn_execute(). */
+    unsigned int lvn_generation;
+    /* fxc2: where the variable is in the summary of a block's stores that
+     * copy propagation is building, see copy_propagation_block_summary. */
+    unsigned int copy_prop_serial;
+    unsigned int copy_prop_index;
+''')
+rep('''struct hlsl_ctx
+{
+    struct vsir_compile_info compile_info;
+''', '''struct hlsl_ctx
+{
+    /* fxc2: numbers the summaries copy propagation builds. */
+    unsigned int copy_prop_serial;
+
+    struct vsir_compile_info compile_info;
+''')
+open(p, "w").write(s)
+
+p = base + "hlsl_codegen.c"
+s = open(p).read()
+
+rep('''struct copy_propagation_state
+{
+    struct rb_tree *scope_var_defs;
+    size_t scope_count, scopes_capacity;
+    struct hlsl_ir_node *stop;
+    bool stopped;
+};
+''', '''/* fxc2: what a block and the blocks nested in it store to, each thing once.
+ * Everything a block stores to is invalidated when control leaves it (and
+ * when it enters a loop), and that was done by walking every instruction of
+ * the block and of the blocks in it, for each level of nesting above them,
+ * to invalidate the same few hundred variables thousands of times. It was
+ * most of the time of compiling a large shader. The stores of a block do not
+ * change during a pass, so the summary is made once per block per pass. */
+struct copy_propagation_block_store
+{
+    struct hlsl_ir_var *var;
+    /* NULL for the components "mask" of a scalar or vector variable. */
+    struct hlsl_ir_store *store;
+    uint32_t hash;
+    unsigned char mask;
+};
+
+struct copy_propagation_block_summary
+{
+    const struct hlsl_block *block;
+    struct copy_propagation_block_store *stores;
+    size_t count, capacity;
+};
+
+struct copy_propagation_state
+{
+    struct rb_tree *scope_var_defs;
+    size_t scope_count, scopes_capacity;
+    struct hlsl_ir_node *stop;
+    bool stopped;
+
+    /* Open addressing, by the block's address. */
+    struct copy_propagation_block_summary **summaries;
+    size_t summary_count, summary_capacity;
+};
+''')
+
+rep('''static void copy_propagation_state_destroy(struct copy_propagation_state *state)
+{
+    while (copy_propagation_pop_scope(state));
+
+    vkd3d_free(state->scope_var_defs);
+}
+''', '''static void copy_propagation_state_destroy(struct copy_propagation_state *state)
+{
+    size_t i;
+
+    while (copy_propagation_pop_scope(state));
+
+    vkd3d_free(state->scope_var_defs);
+
+    for (i = 0; i < state->summary_capacity; ++i)
+    {
+        if (state->summaries[i])
+        {
+            vkd3d_free(state->summaries[i]->stores);
+            vkd3d_free(state->summaries[i]);
+        }
+    }
+    vkd3d_free(state->summaries);
+}
+
+/* The summaries are of the program as it is: whoever keeps a state while
+ * changing the program drops them. */
+static void copy_propagation_state_drop_summaries(struct copy_propagation_state *state)
+{
+    size_t i;
+
+    for (i = 0; i < state->summary_capacity; ++i)
+    {
+        if (state->summaries[i])
+        {
+            vkd3d_free(state->summaries[i]->stores);
+            vkd3d_free(state->summaries[i]);
+        }
+    }
+    vkd3d_free(state->summaries);
+    state->summaries = NULL;
+    state->summary_count = state->summary_capacity = 0;
+}
+''')
+
+rep('''        current_index = index_instructions(block, *index);
+        progress |= copy_propagation_transform_block(ctx, block, state);
+''', '''        current_index = index_instructions(block, *index);
+        copy_propagation_state_drop_summaries(state);
+        progress |= copy_propagation_transform_block(ctx, block, state);
+''')
+
+rep('''static void copy_propagation_invalidate_from_block(struct hlsl_ctx *ctx, struct copy_propagation_state *state,
+        struct hlsl_block *block, unsigned int time)
+{
+    struct hlsl_ir_node *instr;
+''', '''static uint32_t copy_propagation_hash_combine(uint32_t h, uintptr_t v)
+{
+    h ^= (uint32_t)v ^ (uint32_t)((uint64_t)v >> 32);
+    h *= 0x9e3779b1u;
+    return h ^ (h >> 15);
+}
+
+static size_t copy_propagation_summary_slot(const struct copy_propagation_state *state,
+        const struct hlsl_block *block)
+{
+    size_t i = copy_propagation_hash_combine(0, (uintptr_t)block >> 3) & (state->summary_capacity - 1);
+
+    while (state->summaries[i] && state->summaries[i]->block != block)
+        i = (i + 1) & (state->summary_capacity - 1);
+    return i;
+}
+
+static bool copy_propagation_summary_insert(struct copy_propagation_state *state,
+        struct copy_propagation_block_summary *summary)
+{
+    if ((state->summary_count + 1) * 2 > state->summary_capacity)
+    {
+        size_t capacity = state->summary_capacity, new_capacity = capacity ? capacity * 2 : 256, i;
+        struct copy_propagation_block_summary **old = state->summaries, **new;
+
+        if (!(new = vkd3d_calloc(new_capacity, sizeof(*new))))
+            return false;
+        state->summaries = new;
+        state->summary_capacity = new_capacity;
+        for (i = 0; i < capacity; ++i)
+        {
+            if (old[i])
+                state->summaries[copy_propagation_summary_slot(state, old[i]->block)] = old[i];
+        }
+        vkd3d_free(old);
+    }
+    state->summaries[copy_propagation_summary_slot(state, summary->block)] = summary;
+    ++state->summary_count;
+    return true;
+}
+
+static uint32_t copy_propagation_store_hash(const struct hlsl_ir_store *store)
+{
+    const struct hlsl_deref *lhs = &store->lhs;
+    uint32_t h = copy_propagation_hash_combine(store->writemask, (uintptr_t)lhs->var >> 3);
+    unsigned int i;
+
+    for (i = 0; i < lhs->path_len; ++i)
+    {
+        const struct hlsl_ir_node *node = lhs->path[i].node;
+
+        if (node->type == HLSL_IR_CONSTANT)
+            h = copy_propagation_hash_combine(h, hlsl_ir_constant(node)->value.u[0].u);
+        else
+            h = copy_propagation_hash_combine(h, (uintptr_t)node >> 3);
+    }
+    return h;
+}
+
+/* Whether the two stores are to the same components of the same variable. */
+static bool copy_propagation_stores_overlap_exactly(const struct hlsl_ir_store *a, const struct hlsl_ir_store *b)
+{
+    unsigned int i;
+
+    if (a->lhs.var != b->lhs.var || a->writemask != b->writemask || a->lhs.path_len != b->lhs.path_len)
+        return false;
+    for (i = 0; i < a->lhs.path_len; ++i)
+    {
+        const struct hlsl_ir_node *na = a->lhs.path[i].node, *nb = b->lhs.path[i].node;
+
+        if (na == nb)
+            continue;
+        if (na->type != HLSL_IR_CONSTANT || nb->type != HLSL_IR_CONSTANT
+                || hlsl_ir_constant(na)->value.u[0].u != hlsl_ir_constant(nb)->value.u[0].u)
+            return false;
+    }
+    return true;
+}
+
+struct copy_propagation_summary_builder
+{
+    struct copy_propagation_block_summary *summary;
+    /* Open addressing, by the store's hash; indices into the summary plus one. */
+    uint32_t *set;
+    size_t set_count, set_capacity;
+    unsigned int serial;
+    bool failed;
+};
+
+static struct copy_propagation_block_store *copy_propagation_summary_append(
+        struct copy_propagation_summary_builder *builder)
+{
+    struct copy_propagation_block_summary *summary = builder->summary;
+
+    if (!vkd3d_array_reserve((void **)&summary->stores, &summary->capacity, summary->count + 1,
+            sizeof(*summary->stores)))
+    {
+        builder->failed = true;
+        return NULL;
+    }
+    return &summary->stores[summary->count++];
+}
+
+static void copy_propagation_summary_add_mask(struct copy_propagation_summary_builder *builder,
+        struct hlsl_ir_var *var, unsigned char mask)
+{
+    struct copy_propagation_block_store *entry;
+
+    if (var->copy_prop_serial == builder->serial)
+    {
+        builder->summary->stores[var->copy_prop_index].mask |= mask;
+        return;
+    }
+    if (!(entry = copy_propagation_summary_append(builder)))
+        return;
+    entry->var = var;
+    entry->store = NULL;
+    entry->hash = 0;
+    entry->mask = mask;
+    var->copy_prop_serial = builder->serial;
+    var->copy_prop_index = builder->summary->count - 1;
+}
+
+static void copy_propagation_summary_add_store(struct copy_propagation_summary_builder *builder,
+        struct hlsl_ir_store *store, uint32_t hash)
+{
+    struct copy_propagation_block_summary *summary = builder->summary;
+    struct copy_propagation_block_store *entry;
+    size_t i;
+
+    if ((builder->set_count + 1) * 2 > builder->set_capacity)
+    {
+        size_t new_capacity = builder->set_capacity ? builder->set_capacity * 2 : 64;
+        uint32_t *new;
+
+        if (!(new = vkd3d_calloc(new_capacity, sizeof(*new))))
+        {
+            builder->failed = true;
+            return;
+        }
+        for (i = 0; i < builder->set_capacity; ++i)
+        {
+            size_t j;
+
+            if (!builder->set[i])
+                continue;
+            j = summary->stores[builder->set[i] - 1].hash & (new_capacity - 1);
+            while (new[j])
+                j = (j + 1) & (new_capacity - 1);
+            new[j] = builder->set[i];
+        }
+        vkd3d_free(builder->set);
+        builder->set = new;
+        builder->set_capacity = new_capacity;
+    }
+
+    for (i = hash & (builder->set_capacity - 1); builder->set[i]; i = (i + 1) & (builder->set_capacity - 1))
+    {
+        entry = &summary->stores[builder->set[i] - 1];
+        if (entry->hash == hash && copy_propagation_stores_overlap_exactly(entry->store, store))
+            return;
+    }
+
+    if (!(entry = copy_propagation_summary_append(builder)))
+        return;
+    entry->var = store->lhs.var;
+    entry->store = store;
+    entry->hash = hash;
+    entry->mask = 0;
+    builder->set[i] = summary->count;
+    ++builder->set_count;
+}
+
+static void copy_propagation_summary_add_block(struct copy_propagation_summary_builder *builder,
+        const struct copy_propagation_block_summary *child)
+{
+    size_t i;
+
+    for (i = 0; i < child->count; ++i)
+    {
+        const struct copy_propagation_block_store *entry = &child->stores[i];
+
+        if (entry->store)
+            copy_propagation_summary_add_store(builder, entry->store, entry->hash);
+        else
+            copy_propagation_summary_add_mask(builder, entry->var, entry->mask);
+    }
+}
+
+static struct copy_propagation_block_summary *copy_propagation_get_block_summary(struct hlsl_ctx *ctx,
+        struct copy_propagation_state *state, const struct hlsl_block *block);
+
+/* The summaries of the blocks in the block, made first: making one numbers the
+ * variables it meets, and so two cannot be made at once. */
+static bool copy_propagation_summarise_nested_blocks(struct hlsl_ctx *ctx, struct copy_propagation_state *state,
+        const struct hlsl_block *block)
+{
+    const struct hlsl_ir_node *instr;
+
+    LIST_FOR_EACH_ENTRY(instr, &block->instrs, struct hlsl_ir_node, entry)
+    {
+        if (instr->type == HLSL_IR_IF)
+        {
+            const struct hlsl_ir_if *iff = hlsl_ir_if(instr);
+
+            if (!copy_propagation_get_block_summary(ctx, state, &iff->then_block)
+                    || !copy_propagation_get_block_summary(ctx, state, &iff->else_block))
+                return false;
+        }
+        else if (instr->type == HLSL_IR_LOOP)
+        {
+            const struct hlsl_ir_loop *loop = hlsl_ir_loop(instr);
+
+            if (!copy_propagation_get_block_summary(ctx, state, &loop->body)
+                    || !copy_propagation_get_block_summary(ctx, state, &loop->iter))
+                return false;
+        }
+        else if (instr->type == HLSL_IR_SWITCH)
+        {
+            const struct hlsl_ir_switch *s = hlsl_ir_switch(instr);
+            const struct hlsl_ir_switch_case *c;
+
+            LIST_FOR_EACH_ENTRY(c, &s->cases, struct hlsl_ir_switch_case, entry)
+            {
+                if (!copy_propagation_get_block_summary(ctx, state, &c->body))
+                    return false;
+            }
+        }
+    }
+    return true;
+}
+
+static struct copy_propagation_block_summary *copy_propagation_get_block_summary(struct hlsl_ctx *ctx,
+        struct copy_propagation_state *state, const struct hlsl_block *block)
+{
+    struct copy_propagation_summary_builder builder = {0};
+    struct copy_propagation_block_summary *summary;
+    struct hlsl_ir_node *instr;
+
+    if (state->summary_capacity && (summary = state->summaries[copy_propagation_summary_slot(state, block)]))
+        return summary;
+
+    if (!copy_propagation_summarise_nested_blocks(ctx, state, block))
+        return NULL;
+    if (!(summary = vkd3d_calloc(1, sizeof(*summary))))
+        return NULL;
+    summary->block = block;
+    builder.summary = summary;
+    builder.serial = ++ctx->copy_prop_serial;
+
+    LIST_FOR_EACH_ENTRY(instr, &block->instrs, struct hlsl_ir_node, entry)
+    {
+        if (instr->type == HLSL_IR_STORE)
+        {
+            struct hlsl_ir_store *store = hlsl_ir_store(instr);
+            struct hlsl_ir_var *var = store->lhs.var;
+
+            if (!store->lhs.path_len && var->data_type->class <= HLSL_CLASS_VECTOR && store->writemask)
+                copy_propagation_summary_add_mask(&builder, var, store->writemask);
+            else
+                copy_propagation_summary_add_store(&builder, store, copy_propagation_store_hash(store));
+        }
+        else if (instr->type == HLSL_IR_IF)
+        {
+            struct hlsl_ir_if *iff = hlsl_ir_if(instr);
+
+            copy_propagation_summary_add_block(&builder,
+                    state->summaries[copy_propagation_summary_slot(state, &iff->then_block)]);
+            copy_propagation_summary_add_block(&builder,
+                    state->summaries[copy_propagation_summary_slot(state, &iff->else_block)]);
+        }
+        else if (instr->type == HLSL_IR_LOOP)
+        {
+            struct hlsl_ir_loop *loop = hlsl_ir_loop(instr);
+
+            copy_propagation_summary_add_block(&builder,
+                    state->summaries[copy_propagation_summary_slot(state, &loop->body)]);
+            copy_propagation_summary_add_block(&builder,
+                    state->summaries[copy_propagation_summary_slot(state, &loop->iter)]);
+        }
+        else if (instr->type == HLSL_IR_SWITCH)
+        {
+            struct hlsl_ir_switch *s = hlsl_ir_switch(instr);
+            struct hlsl_ir_switch_case *c;
+
+            LIST_FOR_EACH_ENTRY(c, &s->cases, struct hlsl_ir_switch_case, entry)
+            {
+                copy_propagation_summary_add_block(&builder,
+                        state->summaries[copy_propagation_summary_slot(state, &c->body)]);
+            }
+        }
+    }
+    vkd3d_free(builder.set);
+
+    if (builder.failed || !copy_propagation_summary_insert(state, summary))
+    {
+        vkd3d_free(summary->stores);
+        vkd3d_free(summary);
+        return NULL;
+    }
+    return summary;
+}
+
+static void copy_propagation_invalidate_from_block_walk(struct hlsl_ctx *ctx, struct copy_propagation_state *state,
+        struct hlsl_block *block, unsigned int time);
+
+static void copy_propagation_invalidate_from_block(struct hlsl_ctx *ctx, struct copy_propagation_state *state,
+        struct hlsl_block *block, unsigned int time)
+{
+    const struct copy_propagation_block_summary *summary;
+    struct copy_propagation_var_def *var_def;
+    size_t i;
+
+    if (!(summary = copy_propagation_get_block_summary(ctx, state, block)))
+    {
+        copy_propagation_invalidate_from_block_walk(ctx, state, block, time);
+        return;
+    }
+
+    for (i = 0; i < summary->count; ++i)
+    {
+        const struct copy_propagation_block_store *entry = &summary->stores[i];
+
+        if (!(var_def = copy_propagation_create_var_def(ctx, state, entry->var)))
+            continue;
+        if (entry->store)
+            copy_propagation_invalidate_variable_from_deref(ctx, var_def,
+                    &entry->store->lhs, entry->store->writemask, time);
+        else
+            copy_propagation_invalidate_variable(ctx, var_def, 0, entry->mask, time);
+    }
+}
+
+static void copy_propagation_invalidate_from_block_walk(struct hlsl_ctx *ctx, struct copy_propagation_state *state,
+        struct hlsl_block *block, unsigned int time)
+{
+    struct hlsl_ir_node *instr;
+''')
+
+a = s.index("static void copy_propagation_invalidate_from_block_walk(struct hlsl_ctx *ctx, struct copy_propagation_state *state,\n        struct hlsl_block *block, unsigned int time)\n{")
+b = s.index("static bool copy_propagation_transform_block(struct hlsl_ctx *ctx, struct hlsl_block *block,", a)
+body = s[a:b]
+assert body.count("copy_propagation_invalidate_from_block(ctx, state, ") == 5
+body = body.replace("copy_propagation_invalidate_from_block(ctx, state, ", "copy_propagation_invalidate_from_block_walk(ctx, state, ")
+s = s[:a] + body + s[b:]
+open(p, "w").write(s)
+print("patched")

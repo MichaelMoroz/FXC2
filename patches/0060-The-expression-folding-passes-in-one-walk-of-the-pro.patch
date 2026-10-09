@@ -1,0 +1,110 @@
+From 56273f3bdaa9bc088e6a9afb9955e6a28632086c Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Fri, 9 Oct 2026 08:02:48 +0200
+Subject: [PATCH 60/60] The expression folding passes in one walk of the
+ program.
+
+---
+ libs/vkd3d-shader/hlsl_codegen.c | 66 ++++++++++++++++++++++++++++----
+ 1 file changed, 58 insertions(+), 8 deletions(-)
+
+diff --git a/libs/vkd3d-shader/hlsl_codegen.c b/libs/vkd3d-shader/hlsl_codegen.c
+index 6ab52f0d..f37bef3f 100644
+--- a/libs/vkd3d-shader/hlsl_codegen.c
++++ b/libs/vkd3d-shader/hlsl_codegen.c
+@@ -12380,18 +12380,68 @@ static struct hlsl_ir_node *fold_conditional_identities(struct hlsl_ctx *ctx,
+     return NULL;
+ }
+ 
++/* fxc2: several replace functions in one walk of the program. The folding
++ * passes were a walk each, six of them in a loop inside another loop, and
++ * walking a large shader's instructions was a quarter of the time of compiling
++ * it, most of it for passes that found nothing to do.
++ * VKD3D_HLSL_MERGE_FOLDS=0 is a walk each again. */
++struct replace_funcs
++{
++    const PFN_replace_func *funcs;
++    unsigned int count;
++};
++
++static bool call_replace_funcs(struct hlsl_ctx *ctx, struct hlsl_ir_node *instr, void *context)
++{
++    const struct replace_funcs *funcs = context;
++    unsigned int i;
++
++    for (i = 0; i < funcs->count; ++i)
++    {
++        if (call_replace_func(ctx, instr, funcs->funcs[i]))
++            return true;
++    }
++    return false;
++}
++
++static bool replace_ir_merged(struct hlsl_ctx *ctx, const PFN_replace_func *funcs, unsigned int count,
++        struct hlsl_block *block)
++{
++    struct replace_funcs context = {funcs, count};
++    static int merge = -1;
++    bool progress = false;
++    unsigned int i;
++
++    if (merge < 0)
++    {
++        const char *e = getenv("VKD3D_HLSL_MERGE_FOLDS");
++
++        merge = !(e && *e == '0');
++    }
++    if (merge)
++        return hlsl_transform_ir(ctx, call_replace_funcs, block, &context);
++
++    for (i = 0; i < count; ++i)
++        progress |= replace_ir(ctx, funcs[i], block);
++    return progress;
++}
++
+ static bool simplify_exprs(struct hlsl_ctx *ctx, struct hlsl_block *block)
+ {
++    static const PFN_replace_func funcs[] =
++    {
++        hlsl_fold_constant_exprs,
++        hlsl_fold_binary_exprs,
++        fold_unary_identities,
++        fold_conditional_identities,
++        hlsl_fold_constant_identities,
++        hlsl_fold_constant_swizzles,
++    };
+     bool progress, any_progress = false;
+ 
+     do
+     {
+-        progress = replace_ir(ctx, hlsl_fold_constant_exprs, block);
+-        progress |= replace_ir(ctx, hlsl_fold_binary_exprs, block);
+-        progress |= replace_ir(ctx, fold_unary_identities, block);
+-        progress |= replace_ir(ctx, fold_conditional_identities, block);
+-        progress |= replace_ir(ctx, hlsl_fold_constant_identities, block);
+-        progress |= replace_ir(ctx, hlsl_fold_constant_swizzles, block);
++        progress = replace_ir_merged(ctx, funcs, ARRAY_SIZE(funcs), block);
+ 
+         any_progress |= progress;
+     } while (progress);
+@@ -12401,6 +12451,7 @@ static bool simplify_exprs(struct hlsl_ctx *ctx, struct hlsl_block *block)
+ 
+ static bool hlsl_run_folding_passes(struct hlsl_ctx *ctx, struct hlsl_block *body)
+ {
++    static const PFN_replace_func swizzle_funcs[] = {fold_swizzle_chains, fold_trivial_swizzles};
+     bool progress, any_progress;
+ 
+     any_progress = replace_ir(ctx, fold_redundant_casts, body);
+@@ -12408,8 +12459,7 @@ static bool hlsl_run_folding_passes(struct hlsl_ctx *ctx, struct hlsl_block *bod
+     {
+         progress = simplify_exprs(ctx, body);
+         progress |= hlsl_copy_propagation_execute(ctx, body);
+-        progress |= replace_ir(ctx, fold_swizzle_chains, body);
+-        progress |= replace_ir(ctx, fold_trivial_swizzles, body);
++        progress |= replace_ir_merged(ctx, swizzle_funcs, ARRAY_SIZE(swizzle_funcs), body);
+         progress |= hlsl_transform_ir(ctx, remove_trivial_conditional_branches, body, NULL);
+ 
+         any_progress |= progress;
+-- 
+2.53.0
+

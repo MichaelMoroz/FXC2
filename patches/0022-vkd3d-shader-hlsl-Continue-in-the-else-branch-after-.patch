@@ -1,7 +1,7 @@
 From dd64460e2250350d4f6dca5460d9508ae1495848 Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 08:08:15 +0200
-Subject: [PATCH 22/58] vkd3d-shader/hlsl: Continue in the else branch after an
+Subject: [PATCH 22/60] vkd3d-shader/hlsl: Continue in the else branch after an
  if that always returns.
 
 ---

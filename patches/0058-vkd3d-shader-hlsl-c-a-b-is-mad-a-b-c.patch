@@ -1,7 +1,7 @@
 From 3fb406280baedcc7c13f9c6cbab72a8e8223fc43 Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Fri, 9 Oct 2026 07:34:41 +0200
-Subject: [PATCH 58/58] vkd3d-shader/hlsl: c - a * b is mad(-a, b, c).
+Subject: [PATCH 58/60] vkd3d-shader/hlsl: c - a * b is mad(-a, b, c).
 
 ---
  libs/vkd3d-shader/hlsl_codegen.c | 19 +++++++++++++++++++

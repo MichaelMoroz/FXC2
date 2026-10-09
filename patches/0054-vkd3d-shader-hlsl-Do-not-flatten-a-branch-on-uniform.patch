@@ -1,7 +1,7 @@
 From 6a7721ac77adde0648f40ccbe9bd97f0ad283a6b Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Fri, 9 Oct 2026 06:16:00 +0200
-Subject: [PATCH 54/58] vkd3d-shader/hlsl: Do not flatten a branch on uniforms
+Subject: [PATCH 54/60] vkd3d-shader/hlsl: Do not flatten a branch on uniforms
  alone.
 
 ---

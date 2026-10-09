@@ -57,3 +57,5 @@ vkd3d-2.1-93-gcfcb4833
 0056-vkd3d-shader-hlsl-A-lower-flattening-limit-for-block.patch
 0057-vkd3d-shader-hlsl-Value-numbering-for-texture-sample.patch
 0058-vkd3d-shader-hlsl-c-a-b-is-mad-a-b-c.patch
+0059-Copy-propagation-summarises-the-stores-of-a-block-on.patch
+0060-The-expression-folding-passes-in-one-walk-of-the-pro.patch

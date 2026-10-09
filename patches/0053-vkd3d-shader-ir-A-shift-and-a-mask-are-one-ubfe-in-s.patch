@@ -1,7 +1,7 @@
 From 5e55f06aa80bc02ec764bda1796d848c1a394ca1 Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Fri, 9 Oct 2026 05:11:28 +0200
-Subject: [PATCH 53/58] vkd3d-shader/ir: A shift and a mask are one ubfe in
+Subject: [PATCH 53/60] vkd3d-shader/ir: A shift and a mask are one ubfe in
  shader model 5.
 
 ---

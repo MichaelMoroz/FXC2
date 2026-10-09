@@ -1,7 +1,7 @@
 From d6bcf754229e0240c9b481d1344513ee84c4e101 Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 07:04:04 +0200
-Subject: [PATCH 08/58] vkd3d-shader/preproc: Expand macros produced by token
+Subject: [PATCH 08/60] vkd3d-shader/preproc: Expand macros produced by token
  pasting.
 
 ---

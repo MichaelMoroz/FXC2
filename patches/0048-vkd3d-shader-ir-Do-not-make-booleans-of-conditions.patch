@@ -1,7 +1,7 @@
 From 67b017a60792acf8ff2d5185d01a31284be6bbde Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Thu, 8 Oct 2026 02:02:35 +0200
-Subject: [PATCH 48/58] vkd3d-shader/ir: Do not make booleans of conditions.
+Subject: [PATCH 48/60] vkd3d-shader/ir: Do not make booleans of conditions.
 
 ---
  libs/vkd3d-shader/ir.c | 208 +++++++++++++++++++++++++++++++++++++++++

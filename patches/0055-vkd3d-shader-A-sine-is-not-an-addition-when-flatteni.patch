@@ -1,7 +1,7 @@
 From 0c6594085ce347ac90058019ff2def58851ea590 Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Fri, 9 Oct 2026 06:23:46 +0200
-Subject: [PATCH 55/58] vkd3d-shader: A sine is not an addition when
+Subject: [PATCH 55/60] vkd3d-shader: A sine is not an addition when
  flattening; sin and cos of one value are one sincos.
 
 ---

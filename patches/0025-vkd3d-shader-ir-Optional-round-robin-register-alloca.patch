@@ -1,7 +1,7 @@
 From af8eddae8bd45d7cfb11f81029388c35dcd6f719 Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 08:18:18 +0200
-Subject: [PATCH 25/58] vkd3d-shader/ir: Optional round-robin register
+Subject: [PATCH 25/60] vkd3d-shader/ir: Optional round-robin register
  allocation.
 
 ---

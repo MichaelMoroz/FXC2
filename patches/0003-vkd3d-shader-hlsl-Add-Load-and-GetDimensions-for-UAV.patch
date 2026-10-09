@@ -1,7 +1,7 @@
 From 46cda134d6a1cae814c2f8e422a3088f07601580 Mon Sep 17 00:00:00 2001
 From: fxc2 <fxc2@localhost>
 Date: Wed, 7 Oct 2026 05:04:13 +0200
-Subject: [PATCH 03/58] vkd3d-shader/hlsl: Add Load() and GetDimensions() for
+Subject: [PATCH 03/60] vkd3d-shader/hlsl: Add Load() and GetDimensions() for
  UAVs and Load() for structured buffers.
 
 ---
