@@ -15,7 +15,7 @@ DXIL or SPIR-V, which D3D11, and so Unity's built-in pipeline and VRChat, cannot
 load.
 
 fxc2 is a second compiler for the same bytecode: vkd3d's HLSL compiler (the
-one Wine uses) with 61 patches, packaged as a command line and as a drop-in
+one Wine uses) with 62 patches, packaged as a command line and as a drop-in
 `d3dcompiler_47.dll`. What comes out is ordinary DXBC. Whoever runs the result
 needs nothing: a Unity build or a VRChat world made with it contains the
 bytecode, not the compiler.
@@ -164,7 +164,7 @@ This repo packages that as:
 | `bin/vkd3d-compiler.exe` | Upstream vkd3d CLI (also does DXBC → SPIR-V/GLSL/MSL/asm). |
 | `tools/hlsl2dxbc.py` | Front-end chooser: `direct`, via Slang, via DXC + SPIRV-Cross, or `auto`. |
 | `bin/unity/` | The pair of DLLs Unity needs: a loader-proof stub named `D3DCompiler_47.dll` plus the real compiler as `fxc2_d3dcompiler.dll` (see Unity below). |
-| `patches/` | 61 patches on top of upstream vkd3d (see below); `tools/vkd3d-patch-scripts/` has the scripts they were made with. |
+| `patches/` | 62 patches on top of upstream vkd3d (see below); `tools/vkd3d-patch-scripts/` has the scripts they were made with. |
 | `tools/replay.py` | Recompiles sources the DLL captured (a Unity project's, say) with and without the optimisations and with FXC, and compares. |
 | `shaderemu/rvc_opt-fxc2.patch` | The changes to ShaderEmu's shader described under "The emulator shader" (merged there since). |
 | `tools/unity_render_shaders.cs`, `tools/compare_images.py` | Render every shader in a Unity folder with fxc2 and with the stock compiler, and compare the pictures. |
@@ -771,6 +771,12 @@ bash scripts/build-vkd3d.sh
 It needs `build-essential mingw-w64 autoconf automake libtool flex bison
 pkg-config wine64-tools libwine-dev spirv-headers libvulkan-dev libjson-perl`,
 clones vkd3d into `~/fxc2`, applies `patches/`, and writes `bin/`.
+62. `#pragma static_noinit`: a `static` array declared after it is not zeroed. HLSL zeroes a static
+    with no initialiser, and an array indexed at run time cannot be proved written before it is
+    read, so every element was stored to on entry: ShaderEmu's tick zeroed its write cache, 937 of
+    its 7,280 instructions and the first 1,000 instructions of the card's code. A shader that
+    writes each element before it reads it asks for this; FXC warns of an unknown pragma and
+    zeroes. Scalars and arrays declared before the pragma are zeroed as before.
 
 ## Tests
 

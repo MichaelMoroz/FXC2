@@ -38,6 +38,7 @@ PROBES = [
     ("language", "min16float / half", "ps_5_0", PS % "min16float a = uv.x; half b = uv.y; return a + b;"),
     ("language", "uniform params on entry", "ps_5_0", "float4 main(float4 p : SV_Position, uniform float k) : SV_Target { return k; }"),
     ("language", "[unroll] / [loop] / [branch] / [flatten]", "ps_5_0", PS % "float a = 0; [unroll] for (int i = 0; i < 4; ++i) a += i; [branch] if (uv.x > 0) a++; [flatten] if (uv.y > 0) a--; return a;"),
+    ("language", "#pragma static_noinit (fxc2; fxc ignores it)", "ps_5_0", "#pragma static_noinit\nstatic float t[8];\n" + PS % "t[(uint)p.x & 7] = uv.x; return t[(uint)p.y & 7];"),
     ("language", "templates (HLSL 2021)", "ps_5_0", "template<typename T> T sq(T x) { return x * x; }\n" + PS % "return sq(uv.x);"),
     ("language", "operator overloading (HLSL 2021)", "ps_5_0", "struct C { float r; C operator+(C o) { C x; x.r = r + o.r; return x; } };\n" + PS % "C a, b; a.r = 1; b.r = 2; return (a + b).r;"),
 
