@@ -15,7 +15,7 @@ DXIL or SPIR-V, which D3D11, and so Unity's built-in pipeline and VRChat, cannot
 load.
 
 fxc2 is a second compiler for the same bytecode: vkd3d's HLSL compiler (the
-one Wine uses) with 62 patches, packaged as a command line and as a drop-in
+one Wine uses) with 64 patches, packaged as a command line and as a drop-in
 `d3dcompiler_47.dll`. What comes out is ordinary DXBC. Whoever runs the result
 needs nothing: a Unity build or a VRChat world made with it contains the
 bytecode, not the compiler.
@@ -164,7 +164,7 @@ This repo packages that as:
 | `bin/vkd3d-compiler.exe` | Upstream vkd3d CLI (also does DXBC → SPIR-V/GLSL/MSL/asm). |
 | `tools/hlsl2dxbc.py` | Front-end chooser: `direct`, via Slang, via DXC + SPIRV-Cross, or `auto`. |
 | `bin/unity/` | The pair of DLLs Unity needs: a loader-proof stub named `D3DCompiler_47.dll` plus the real compiler as `fxc2_d3dcompiler.dll` (see Unity below). |
-| `patches/` | 62 patches on top of upstream vkd3d (see below); `tools/vkd3d-patch-scripts/` has the scripts they were made with. |
+| `patches/` | 64 patches on top of upstream vkd3d (see below); `tools/vkd3d-patch-scripts/` has the scripts they were made with. |
 | `tools/replay.py` | Recompiles sources the DLL captured (a Unity project's, say) with and without the optimisations and with FXC, and compares. |
 | `shaderemu/rvc_opt-fxc2.patch` | The changes to ShaderEmu's shader described under "The emulator shader" (merged there since). |
 | `tools/unity_render_shaders.cs`, `tools/compare_images.py` | Render every shader in a Unity folder with fxc2 and with the stock compiler, and compare the pictures. |
@@ -760,6 +760,13 @@ that take more than two seconds to `fxc2_slow\`. `python tools/failsrc.py
 <saved file>` prints the offending source lines, following `#line` directives.
 This is how every Unity and ShaderEmu gap above was found.
 
+A source that names `FXC2_MICROSOFT_<profile>` (`FXC2_MICROSOFT_hs_5_0`) has that stage
+compiled by Microsoft's compiler, `D3DCompiler_47.dll.microsoft` beside the DLL (where
+`unity-overlay.ps1` keeps it), and the log says so. Unity preprocesses a shader before the
+compiler sees it, so `#define`s and comments are gone: name it in a declaration
+(`static const int FXC2_MICROSOFT_hs_5_0 = 0;`). It tells, stage by stage, whether a shader
+that goes wrong goes wrong in vkd3d.
+
 ## Building
 
 `bin/` is checked in. To rebuild, from WSL/Linux:
@@ -777,6 +784,18 @@ clones vkd3d into `~/fxc2`, applies `patches/`, and writes `bin/`.
     its 7,280 instructions and the first 1,000 instructions of the card's code. A shader that
     writes each element before it reads it asks for this; FXC warns of an unknown pragma and
     zeroes. Scalars and arrays declared before the pragma are zeroed as before.
+63. Declarations in the order FXC writes them, and SM5 code in an `SHEX` chunk, as FXC's. A hull or
+    domain shader declares its global flags after the tessellator's declarations (a hull shader
+    opens with `hs_decls`); a geometry shader with a `dcl_stream` declares its output topology
+    after the stream and its vertex count after the last declaration. ShaderEmu's tick is the
+    same code under another chunk tag.
+64. A relative index is read from a temp register, as FXC writes it. `I[id]` in a hull shader's
+    control point phase was an indexable temp indexed by `vOutputControlPointID` itself: WARP
+    drew it, and an NVIDIA card (RTX 5070 Laptop, D3D11) removed the device at the first draw
+    (`887a0005`), in Unity and in a program of its own. An index read from anything else is
+    copied first (`mov r0.x, vOutputControlPointID`). Found by compiling a tessellation and
+    geometry-shader blit one stage at a time with Microsoft's compiler (`FXC2_MICROSOFT_`, under
+    "Call tracing"). ShaderEmu's tick is the same code.
 
 ## Tests
 

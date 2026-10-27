@@ -1,0 +1,107 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Tue, 27 Oct 2026 16:40:00 +0100
+Subject: [PATCH] vkd3d-shader/tpf: Declarations in the order fxc writes them, SM5 code in an SHEX chunk.
+
+---
+--- a/libs/vkd3d-shader/tpf.c
++++ b/libs/vkd3d-shader/tpf.c
+@@ -4464,9 +4464,35 @@
+     }
+ }
+ 
++static bool tpf_gs_has_stream(struct vsir_program *program)
++{
++    struct vsir_program_iterator it = vsir_program_iterator(&program->instructions);
++    struct vsir_instruction *ins;
++
++    if (program->shader_version.type != VKD3D_SHADER_TYPE_GEOMETRY)
++        return false;
++    for (ins = vsir_program_iterator_head(&it); ins; ins = vsir_program_iterator_next(&it))
++    {
++        if (ins->opcode == VSIR_OP_DCL_STREAM)
++            return true;
++    }
++    return false;
++}
++
++static bool tpf_is_dcl(const struct vsir_instruction *ins)
++{
++    return (VSIR_OP_DCL <= ins->opcode && ins->opcode <= VSIR_OP_DCL_VERTICES_OUT)
++            || ins->opcode == VSIR_OP_HS_DECLS || ins->opcode == VSIR_OP_NOP;
++}
++
++/* A geometry shader that declares a stream gets its output topology after the stream and its vertex count after the
++ * last declaration, as fxc writes them: the topology and the outputs declared after a dcl_stream are that stream's.
++ * Written before it (vkd3d's order), an NVIDIA card drew garbage from a 32-instance geometry shader under
++ * tessellation and then removed the device. */
+ static void tpf_write_program(struct tpf_compiler *tpf, struct vsir_program *program)
+ {
+     struct vsir_program_iterator it = vsir_program_iterator(&program->instructions);
++    bool stream = tpf_gs_has_stream(program), topology = false, count = false;
+     struct vsir_instruction *ins;
+ 
+     if (tpf->program->shader_version.type == VKD3D_SHADER_TYPE_COMPUTE)
+@@ -4474,8 +4500,21 @@
+ 
+     for (ins = vsir_program_iterator_head(&it); ins; ins = vsir_program_iterator_next(&it))
+     {
++        if (stream && !count && !tpf_is_dcl(ins))
++        {
++            tpf_write_dcl_vertices_out(tpf, program->vertices_out_count);
++            count = true;
++        }
+         tpf_handle_instruction(tpf, ins);
++        if (stream && !topology && ins->opcode == VSIR_OP_DCL_STREAM)
++        {
++            if (program->output_topology != VKD3D_PT_UNDEFINED)
++                tpf_write_dcl_output_topology(tpf, program->output_topology);
++            topology = true;
++        }
+     }
++    if (stream && !count)
++        tpf_write_dcl_vertices_out(tpf, program->vertices_out_count);
+ }
+ 
+ static void tpf_write_shdr(struct tpf_compiler *tpf)
+@@ -4504,7 +4543,9 @@
+     put_u32(&buffer, vkd3d_make_u32((version->major << 4) | version->minor, shader_types[version->type]));
+     token_count_position = put_u32(&buffer, 0);
+ 
+-    if (program->global_flags & (VKD3D_SM4_GLOBAL_FLAGS_MASK >> VKD3D_SM4_GLOBAL_FLAGS_SHIFT))
++    /* fxc's order: a hull shader opens with hs_decls, and the global flags follow the tessellator's declarations. */
++    if (version->type != VKD3D_SHADER_TYPE_HULL && version->type != VKD3D_SHADER_TYPE_DOMAIN
++            && (program->global_flags & (VKD3D_SM4_GLOBAL_FLAGS_MASK >> VKD3D_SM4_GLOBAL_FLAGS_SHIFT)))
+         write_sm4_dcl_global_flags(tpf, program->global_flags);
+ 
+     if (version->type == VKD3D_SHADER_TYPE_HULL)
+@@ -4525,18 +4566,25 @@
+     else if (version->type == VKD3D_SHADER_TYPE_GEOMETRY)
+     {
+         tpf_write_dcl_input_primitive(tpf, program->input_primitive, program->input_control_point_count);
+-        if (program->output_topology != VKD3D_PT_UNDEFINED)
+-            tpf_write_dcl_output_topology(tpf, program->output_topology);
+-        tpf_write_dcl_vertices_out(tpf, program->vertices_out_count);
++        if (!tpf_gs_has_stream(program))
++        {
++            if (program->output_topology != VKD3D_PT_UNDEFINED)
++                tpf_write_dcl_output_topology(tpf, program->output_topology);
++            tpf_write_dcl_vertices_out(tpf, program->vertices_out_count);
++        }
+         if (program->gs_instance_count)
+             tpf_write_dcl_gs_instances(tpf, program->gs_instance_count);
+     }
+ 
++    if ((version->type == VKD3D_SHADER_TYPE_HULL || version->type == VKD3D_SHADER_TYPE_DOMAIN)
++            && (program->global_flags & (VKD3D_SM4_GLOBAL_FLAGS_MASK >> VKD3D_SM4_GLOBAL_FLAGS_SHIFT)))
++        write_sm4_dcl_global_flags(tpf, program->global_flags);
++
+     tpf_write_program(tpf, program);
+ 
+     set_u32(&buffer, token_count_position, bytecode_get_size(&buffer) / sizeof(uint32_t));
+ 
+-    add_section(tpf, TAG_SHDR, &buffer);
++    add_section(tpf, version->major >= 5 ? TAG_SHEX : TAG_SHDR, &buffer);
+     tpf->buffer = NULL;
+ }
+ 

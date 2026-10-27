@@ -128,6 +128,45 @@ static HRESULT compile_with_retry(const void *data, SIZE_T data_size, const char
         UINT flags, UINT effect_flags, UINT secondary_flags, const void *secondary_data,
         SIZE_T secondary_data_size, ID3DBlob **shader, ID3DBlob **error_messages);
 
+/* A source that names FXC2_MICROSOFT_<profile> (FXC2_MICROSOFT_hs_5_0, in a #define or a comment) has that profile
+ * compiled by Microsoft's compiler, D3DCompiler_47.dll.microsoft beside this DLL (where unity-overlay.ps1 keeps it):
+ * a way to tell, stage by stage, whether a shader that goes wrong goes wrong in vkd3d. */
+typedef HRESULT (WINAPI *compile2_fn)(const void *, SIZE_T, const char *, const D3D_SHADER_MACRO *, ID3DInclude *,
+        const char *, const char *, UINT, UINT, UINT, const void *, SIZE_T, ID3DBlob **, ID3DBlob **);
+
+static compile2_fn microsoft_for(const void *data, SIZE_T size, const char *profile)
+{
+    static compile2_fn compile;
+    static int tried;
+    char marker[64], path[MAX_PATH], *slash;
+    SIZE_T i, n;
+    HMODULE self;
+
+    if (!profile)
+        return NULL;
+    n = snprintf(marker, sizeof(marker), "FXC2_MICROSOFT_%s", profile);
+    for (i = 0; i + n <= size; i++)
+        if (!memcmp((const char *)data + i, marker, n))
+            break;
+    if (i + n > size)
+        return NULL;
+    if (!tried)
+    {
+        tried = 1;
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                (const char *)microsoft_for, &self) && GetModuleFileNameA(self, path, sizeof(path)))
+        {
+            if ((slash = strrchr(path, '\\')))
+                strcpy(slash + 1, "D3DCompiler_47.dll.microsoft");
+            HMODULE ms = LoadLibraryExA(path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+            if (ms)
+                compile = (compile2_fn)GetProcAddress(ms, "D3DCompile2");
+            log_line("microsoft compiler %s: %s", path, compile ? "loaded" : "not found");
+        }
+    }
+    return compile;
+}
+
 HRESULT WINAPI D3DCompile2(const void *data, SIZE_T data_size, const char *filename,
         const D3D_SHADER_MACRO *macros, ID3DInclude *include, const char *entrypoint, const char *profile,
         UINT flags, UINT effect_flags, UINT secondary_flags, const void *secondary_data,
@@ -135,8 +174,16 @@ HRESULT WINAPI D3DCompile2(const void *data, SIZE_T data_size, const char *filen
 {
     ID3DBlob *messages = NULL;
     DWORD start = GetTickCount(), elapsed;
+    compile2_fn microsoft;
     HRESULT hr;
 
+    if ((microsoft = microsoft_for(data, data_size, profile)))
+    {
+        hr = microsoft(data, data_size, filename, macros, include, entrypoint, profile, flags, effect_flags,
+                secondary_flags, secondary_data, secondary_data_size, shader, error_messages);
+        log_line("D3DCompile %s %s by Microsoft's compiler hr=%#lx", profile, entrypoint ? entrypoint : "(null)", hr);
+        return hr;
+    }
     hr = compile_with_retry(data, data_size, filename, macros, include, entrypoint, profile, flags, effect_flags,
             secondary_flags, secondary_data, secondary_data_size, shader, &messages);
     elapsed = GetTickCount() - start;

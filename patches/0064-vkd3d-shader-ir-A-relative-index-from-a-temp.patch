@@ -1,0 +1,78 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Tue, 27 Oct 2026 16:40:00 +0100
+Subject: [PATCH] vkd3d-shader/ir: A relative index is read from a temp register.
+
+---
+--- a/libs/vkd3d-shader/ir.c
++++ b/libs/vkd3d-shader/ir.c
+@@ -13786,6 +13786,60 @@
+  * registers is zero-based and contiguous.
+  * The intent for temp contraction is that HLSL will output each distinct
+  * variable to a unique temp ID. */
++/* fxc2: a relative index is read from a temp register, as fxc writes it. The HLSL compiler can leave an input
++ * there, I[id] in a hull shader's control point phase indexed by vOutputControlPointID itself: WARP takes it, and an
++ * NVIDIA card (RTX 5070 Laptop, D3D11) removed the device at the first draw. Such an index is copied into a value of
++ * its own first (mov r0.x, vOutputControlPointID), which the allocation below makes a temp. */
++static enum vkd3d_result vsir_program_index_from_temps(struct vsir_program *program)
++{
++    struct vsir_program_iterator it = vsir_program_iterator(&program->instructions);
++    struct vsir_instruction *ins, *mov;
++
++    for (ins = vsir_program_iterator_head(&it); ins; ins = vsir_program_iterator_next(&it))
++    {
++        for (unsigned int i = 0; i < ins->dst_count + ins->src_count; ++i)
++        {
++            struct vsir_operand *reg = i < ins->dst_count ? &ins->dst[i].reg : &ins->src[i - ins->dst_count].reg;
++
++            for (unsigned int k = 0; k < reg->idx_count; ++k)
++            {
++                struct vsir_src_operand *rel = reg->idx[k].rel_addr;
++                struct vkd3d_shader_location loc = ins->location;
++                struct vsir_src_operand index;
++                unsigned int id;
++
++                if (!rel || rel->reg.type == VSIR_REGISTER_TEMP || rel->reg.type == VSIR_REGISTER_SSA)
++                    continue;
++                index = *rel;
++                id = program->ssa_count++;
++                if (!(mov = vsir_program_iterator_insert_before_and_move(&it, 1)))
++                    return VKD3D_ERROR_OUT_OF_MEMORY;
++                vsir_instruction_init_with_params(program, mov, &loc, VSIR_OP_MOV, 1, 1);
++                vsir_dst_operand_init(&mov->dst[0], VSIR_REGISTER_SSA, VSIR_DATA_U32, 1);
++                mov->dst[0].reg.idx[0].offset = id;
++                mov->dst[0].reg.dimension = VSIR_DIMENSION_VEC4;
++                mov->dst[0].write_mask = VKD3DSP_WRITEMASK_0;
++                mov->src[0] = index;
++                mov->src[0].reg.data_type = VSIR_DATA_U32;
++                if (index.reg.dimension == VSIR_DIMENSION_VEC4)
++                {
++                    unsigned int c = vsir_swizzle_get_component(index.swizzle, 0);
++
++                    mov->src[0].swizzle = vkd3d_shader_create_swizzle(c, c, c, c);
++                }
++                vsir_operand_init(&rel->reg, VSIR_REGISTER_SSA, VSIR_DATA_U32, 1);
++                rel->reg.idx[0].offset = id;
++                rel->reg.dimension = VSIR_DIMENSION_VEC4;
++                rel->swizzle = VKD3D_SHADER_SWIZZLE(X, X, X, X);
++                rel->modifiers = 0;
++                ins = vsir_program_iterator_next(&it);
++                reg = i < ins->dst_count ? &ins->dst[i].reg : &ins->src[i - ins->dst_count].reg;
++            }
++        }
++    }
++    return VKD3D_OK;
++}
++
+ static enum vkd3d_result vsir_allocate_temp_registers(struct vsir_program *program,
+         struct vkd3d_shader_message_context *message_context)
+ {
+@@ -13801,6 +13855,8 @@
+ 
+     if ((ret = vsir_program_forward_destinations(program)) < 0)
+         return ret;
++    if (program->shader_version.major >= 4 && (ret = vsir_program_index_from_temps(program)) < 0)
++        return ret;
+ 
+     if ((ret = track_liveness(program, &tracker)))
+         return ret;
