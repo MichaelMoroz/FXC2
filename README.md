@@ -118,7 +118,14 @@ that loads the real compiler, `fxc2_d3dcompiler.dll`, the normal way.
 
 Good to know:
 
-- `#ifdef __FXC2__` tells the compilers apart in shader code.
+- `#ifdef __FXC2__` tells the compilers apart in shader code. `__FXC2_VERSION__` is the newest
+  patch's number the build has; a shader that needs a fix refuses an older fxc2 outright:
+
+      #if defined(__FXC2__) && (!defined(__FXC2_VERSION__) || __FXC2_VERSION__ < 65)
+      #error "needs fxc2 65 or newer"
+      #endif
+
+  (fxc2 before 65 defines `__FXC2__` alone; Microsoft's compiler defines neither.)
 - Create `%TEMP%\fxc2.log.on` and every compile is logged to
   `%TEMP%\fxc2.log` (profile, entry point, result, milliseconds); sources that
   fail are saved to `%TEMP%\fxc2_fail\` with the messages on top. With
@@ -796,6 +803,9 @@ clones vkd3d into `~/fxc2`, applies `patches/`, and writes `bin/`.
     copied first (`mov r0.x, vOutputControlPointID`). Found by compiling a tessellation and
     geometry-shader blit one stage at a time with Microsoft's compiler (`FXC2_MICROSOFT_`, under
     "Call tracing"). ShaderEmu's tick is the same code.
+65. `__FXC2_VERSION__` is predefined: the newest patch's number (`scripts/build-vkd3d.sh` writes it
+    into `fxc2_version.h`). A shader that needs a fix tests it with `#error` (under "Good to know"),
+    so an older fxc2 fails it at compile time instead of drawing it wrong.
 
 ## Tests
 

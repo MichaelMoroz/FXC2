@@ -32,6 +32,9 @@ done
 # the mingw include path.
 rm -rf "$XINC" && mkdir -p "$XINC"
 cp -r /usr/include/vulkan /usr/include/vk_video /usr/include/spirv "$XINC/"
+# __FXC2_VERSION__ (patch 65): the newest patch's number, so it rises with every patch
+V=$(ls "$REPO"/patches/*.patch | sed 's#.*/##' | sort | tail -1 | cut -c1-4)
+echo "#define FXC2_VERSION $((10#$V))" > "$XINC/fxc2_version.h"
 
 [ -x "$SRC/configure" ] || (cd "$SRC" && ./autogen.sh)
 
