@@ -1,0 +1,25 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Fri, 30 Oct 2026 20:10:00 +0100
+Subject: [PATCH 67/67] vkd3d-shader/hlsl: [flatten] leaves a block with a jump a branch.
+
+---
+diff --git a/libs/vkd3d-shader/hlsl_codegen.c b/libs/vkd3d-shader/hlsl_codegen.c
+index 57e193fd..7224e25f 100644
+--- a/libs/vkd3d-shader/hlsl_codegen.c
++++ b/libs/vkd3d-shader/hlsl_codegen.c
+@@ -5838,7 +5838,11 @@ static bool can_flatten_conditional_block(struct hlsl_ctx *ctx, const struct hls
+ 
+                 if (jump->type != HLSL_IR_JUMP_DISCARD_NZ && jump->type != HLSL_IR_JUMP_DISCARD_NEG)
+                 {
+-                    hlsl_fixme(ctx, &instr->loc, "Flattening conditional blocks with non-discard jump instructions.");
++                    /* fxc2: a break (a return inside a loop has become one) cannot be a select.
++                     * [flatten] is a hint here: FXC leaves such a branch a branch, a breakc in
++                     * Unity's ScreenSpaceReflections. Below 2.1 there are no branches to leave. */
++                    if (hlsl_version_lt(ctx, 2, 1))
++                        hlsl_fixme(ctx, &instr->loc, "Flattening conditional blocks with non-discard jump instructions.");
+                     return false;
+                 }
+                 break;
+--
+2.53.0

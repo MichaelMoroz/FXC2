@@ -63,3 +63,6 @@ vkd3d-2.1-93-gcfcb4833
 0062-vkd3d-shader-hlsl-pragma-static_noinit-static-arrays.patch
 0063-vkd3d-shader-tpf-Declarations-in-fxc-s-order.patch
 0064-vkd3d-shader-ir-A-relative-index-from-a-temp.patch
+0065-vkd3d-shader-preproc-Predefine-__FXC2_VERSION__.patch
+0066-vkd3d-shader-hlsl-Attribute-arguments-may-be-constan.patch
+0067-vkd3d-shader-hlsl--flatten--leaves-a-block-with-a-ju.patch

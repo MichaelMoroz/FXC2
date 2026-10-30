@@ -1,0 +1,88 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: fxc2 <fxc2@localhost>
+Date: Fri, 30 Oct 2026 20:00:00 +0100
+Subject: [PATCH 66/66] vkd3d-shader/hlsl: Attribute arguments may be constant expressions.
+
+---
+diff --git a/libs/vkd3d-shader/hlsl_codegen.c b/libs/vkd3d-shader/hlsl_codegen.c
+index f37bef3f..57e193fd 100644
+--- a/libs/vkd3d-shader/hlsl_codegen.c
++++ b/libs/vkd3d-shader/hlsl_codegen.c
+@@ -11481,6 +11481,63 @@ struct hlsl_reg hlsl_reg_from_deref(struct hlsl_ctx *ctx, const struct hlsl_dere
+     return ret;
+ }
+ 
++/* fxc2: an argument may be any constant expression, "[numthreads(16, 128 / 16, 1)]" or one that
++ * reads a static const (Unity's AutoExposure.compute). It is folded on a copy with the static
++ * initialisers in front, as evaluate_static_expression() does for an array size: the arguments
++ * share one block, and only the copy of this one's node is looked at. */
++static bool evaluate_attribute_argument(struct hlsl_ctx *ctx, const struct hlsl_attribute *attr,
++        unsigned int i, int *value)
++{
++    const struct hlsl_ir_node *instr = attr->args[i].node;
++    struct hlsl_block statics, copy;
++    struct hlsl_ir_node *node;
++    unsigned int index = 0;
++    bool found = false, ret = false;
++    struct hlsl_src src;
++
++    LIST_FOR_EACH_ENTRY(node, &attr->instrs.instrs, struct hlsl_ir_node, entry)
++    {
++        if (node == instr)
++        {
++            found = true;
++            break;
++        }
++        ++index;
++    }
++    if (found)
++    {
++        if (!hlsl_clone_block(ctx, &copy, &attr->instrs))
++            return false;
++        LIST_FOR_EACH_ENTRY(node, &copy.instrs, struct hlsl_ir_node, entry)
++        {
++            if (!index--)
++                break;
++        }
++        if (!hlsl_clone_block(ctx, &statics, &ctx->static_initializers))
++        {
++            hlsl_block_cleanup(&copy);
++            return false;
++        }
++        hlsl_block_add_block(&statics, &copy);
++
++        hlsl_src_from_node(&src, node);
++        hlsl_lower_index_loads(ctx, &statics);
++        hlsl_run_const_passes(ctx, &statics);
++        if (src.node->type == HLSL_IR_CONSTANT)
++        {
++            *value = hlsl_ir_constant(src.node)->value.u[0].i;
++            ret = true;
++        }
++        hlsl_src_remove(&src);
++        hlsl_block_cleanup(&statics);
++    }
++
++    if (!ret)
++        hlsl_error(ctx, &instr->loc, VKD3D_SHADER_ERROR_HLSL_INVALID_SYNTAX,
++                "Argument %u of [%s] is not a constant expression.", i, attr->name);
++    return ret;
++}
++
+ static bool get_integral_argument_value(struct hlsl_ctx *ctx, const struct hlsl_attribute *attr,
+         unsigned int i, int *value)
+ {
+@@ -11501,10 +11558,7 @@ static bool get_integral_argument_value(struct hlsl_ctx *ctx, const struct hlsl_
+     }
+ 
+     if (instr->type != HLSL_IR_CONSTANT)
+-    {
+-        hlsl_fixme(ctx, &instr->loc, "Non-constant expression in [%s] initializer.", attr->name);
+-        return false;
+-    }
++        return evaluate_attribute_argument(ctx, attr, i, value);
+ 
+     *value = hlsl_ir_constant(instr)->value.u[0].i;
+     return true;
+--
+2.53.0

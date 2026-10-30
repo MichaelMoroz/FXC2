@@ -15,7 +15,7 @@ DXIL or SPIR-V, which D3D11, and so Unity's built-in pipeline and VRChat, cannot
 load.
 
 fxc2 is a second compiler for the same bytecode: vkd3d's HLSL compiler (the
-one Wine uses) with 64 patches, packaged as a command line and as a drop-in
+one Wine uses) with 67 patches, packaged as a command line and as a drop-in
 `d3dcompiler_47.dll`. What comes out is ordinary DXBC. Whoever runs the result
 needs nothing: a Unity build or a VRChat world made with it contains the
 bytecode, not the compiler.
@@ -171,7 +171,7 @@ This repo packages that as:
 | `bin/vkd3d-compiler.exe` | Upstream vkd3d CLI (also does DXBC → SPIR-V/GLSL/MSL/asm). |
 | `tools/hlsl2dxbc.py` | Front-end chooser: `direct`, via Slang, via DXC + SPIRV-Cross, or `auto`. |
 | `bin/unity/` | The pair of DLLs Unity needs: a loader-proof stub named `D3DCompiler_47.dll` plus the real compiler as `fxc2_d3dcompiler.dll` (see Unity below). |
-| `patches/` | 64 patches on top of upstream vkd3d (see below); `tools/vkd3d-patch-scripts/` has the scripts they were made with. |
+| `patches/` | 67 patches on top of upstream vkd3d (see below); `tools/vkd3d-patch-scripts/` has the scripts they were made with. |
 | `tools/replay.py` | Recompiles sources the DLL captured (a Unity project's, say) with and without the optimisations and with FXC, and compares. |
 | `shaderemu/rvc_opt-fxc2.patch` | The changes to ShaderEmu's shader described under "The emulator shader" (merged there since). |
 | `tools/unity_render_shaders.cs`, `tools/compare_images.py` | Render every shader in a Unity folder with fxc2 and with the stock compiler, and compare the pictures. |
@@ -806,6 +806,14 @@ clones vkd3d into `~/fxc2`, applies `patches/`, and writes `bin/`.
 65. `__FXC2_VERSION__` is predefined: the newest patch's number (`scripts/build-vkd3d.sh` writes it
     into `fxc2_version.h`). A shader that needs a fix tests it with `#error` (under "Good to know"),
     so an older fxc2 fails it at compile time instead of drawing it wrong.
+66. An attribute's argument may be any constant expression: `[numthreads(16, 128 / 16, 1)]` (Unity's
+    `AutoExposure.compute`, through macros) or one that reads a `static const`, for `numthreads` and
+    the attributes parsed the same way (`maxvertexcount`, `outputcontrolpoints`). It was a "not yet
+    implemented" error for anything but a literal. `tests/shaders/numthreads_expr_cs.hlsl`.
+67. `[flatten]` on a block with a `break` in it (a `return` inside a loop has become one by then) leaves
+    it a branch, as FXC does, instead of failing: Unity's `ScreenSpaceReflections`, whose `March` has
+    `UNITY_FLATTEN if (z.y < depth) { ...; return result; }` in its loop. Below shader model 2.1, which
+    has no branches, it is still an error. `tests/shaders/flatten_jump_ps.hlsl`.
 
 ## Tests
 
